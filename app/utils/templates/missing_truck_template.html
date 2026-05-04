@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Missing Photos Reminder</title>
+  <style type="text/css">
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f9fafb;
+      color: #333;
+      margin: 0;
+      padding: 0;
+    }
+
+    .container {
+      max-width: 600px;
+      margin: 30px auto;
+      background-color: #ffffff;
+      border-radius: 10px;
+      padding: 0;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      overflow: hidden;
+    }
+
+    .header {
+      background-color: #0d9488;
+      padding: 18px 24px;
+      color: #ffffff;
+    }
+
+    .header h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .content {
+      padding: 30px;
+    }
+
+    h3 {
+      margin-top: 0;
+    }
+
+    p {
+      line-height: 1.6;
+    }
+
+    ul {
+      margin: 10px 0 20px 20px;
+    }
+
+    li {
+      margin-bottom: 6px;
+    }
+
+    .footer {
+      text-align: center;
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 30px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <div class="header">
+      <h2>Missing Truck Photos Reminder</h2>
+    </div>
+
+    <!-- Content -->
+    <div class="content">
+      <h3>Hi *|FNAME|*,</h3>
+
+      <p>
+        Thank you for listing your <strong>*|YEAR|* *|MAKE|* *|MODEL|*</strong> on
+        <strong>UglyTruck.ai</strong>.
+      </p>
+
+      <p>
+        We noticed that some essential photos are missing from your listing. Please upload the following
+        views to help your truck attract more buyers:
+      </p>
+
+      <ul>
+        {% for view in MISSING_VIEWS %}
+        <li>{{ view }}</li>
+        {% endfor %}
+      </ul>
+
+      <p>
+        Adding these photos makes your listing stand out and helps our system match your truck with the
+        most relevant and verified buyers.
+      </p>
+
+      <p>Best regards,<br />UglyTruck.ai Team</p>
+
+      <div class="footer">
+        <p style="margin:0;">
+          © 2025 UglyTruck.ai — Helping you sell your truck smarter, not harder.
+        </p>
+      </div>
+    </div>
+
+  </div>
+</body>
+
+</html>

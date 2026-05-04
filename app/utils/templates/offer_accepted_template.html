@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Offer Accepted</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f6f8; font-family: Arial, Helvetica, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td align="center" style="padding:30px 0;">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#065f46; padding:18px 24px;">
+              <h2 style="margin:0; color:#ffffff; font-size:20px;">
+                Offer Accepted 🎉
+              </h2>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:24px; color:#374151; font-size:14px; line-height:1.6;">
+              <p style="margin-top:0;">
+                Hi <strong>{{seller_name}}</strong>,
+              </p>
+
+              <p>
+                Congratulations! You have successfully accepted an offer on your truck listed on
+                <strong>UglyTruck.ai</strong>.
+              </p>
+
+              <p>
+                <strong>Truck Details:</strong><br />
+                {{truck_year}} {{truck_make}} {{truck_model}}<br />
+                VIN: {{vin}}
+              </p>
+
+              <p>
+                <strong>Accepted Offer Amount:</strong><br />
+                ${{offer_amount}}
+              </p>
+
+              <p>
+                Our team will guide you through the next steps, including documentation,
+                payment coordination, and title transfer.
+              </p>
+
+              <!-- CTA -->
+              <p style="text-align:center; margin:30px 0;">
+                <a href="{{dashboard_url}}"
+                   style="background-color:#16a34a; color:#ffffff; text-decoration:none; padding:12px 24px; border-radius:6px; font-weight:bold; display:inline-block;">
+                  View Next Steps
+                </a>
+              </p>
+
+              <p>
+                Thank you for choosing <strong>UglyTruck.ai</strong>. We’re excited to help you close this deal!
+              </p>
+
+              <p style="margin-bottom:0;">
+                Best regards,<br />
+                <strong>UglyTruck.ai Team</strong>
+              </p>
+                <div class="footer" style="margin-top:20px; font-size:12px; color:#6b7280; text-align:center;">
+                <p style="margin:0;">
+                  © 2025 UglyTruck.ai — Helping you sell your truck smarter, not harder.
+                </p>
+              </div>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

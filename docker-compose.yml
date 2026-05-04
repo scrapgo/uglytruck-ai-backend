@@ -1,0 +1,19 @@
+services:
+  backend:
+    build: ./
+    container_name: uglytruck-backend
+    ports:
+      - "9160:9160"
+    env_file:
+      - ./.env
+    restart: always
+ 
+#  frontend:
+#    build: ./UglyTruck-Frontend
+#    container_name: uglytruck-frontend
+#    ports:
+#      - "3000:80"
+#    restart: always
+#    depends_on:
+#      - backend
+  

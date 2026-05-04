@@ -1,0 +1,52 @@
+from collections import namedtuple
+
+Status = namedtuple("Status", [
+    "CLOSED",
+    "COMPLETE",
+    "CONTACTED",
+    "CONTACTED_VM",
+    "DNC",
+    "DOCS_RECEIVED",
+    "DOES_NOT_MEET_EXPECTATIONS",
+    "FUNDED",
+    "NQ",
+    "NEED_PICS",
+    "NEW_LEAD",
+    "NEXT_STEPS",
+    "NO_LONGER_AVAILABLE",
+    "NO_QUOTE",
+    "OFFER_ACCEPTED",      # ← ADD THIS
+    "OFFER_DECLINED",
+    "OFFER_EXPIRED",
+    "OFFER_MADE",
+    "OFFER_MADE_EXPIRED",
+    "SOLD",
+    "SOLD_TO_OTHER",
+    "UNRESPONSIVE",
+    "SOLD_TO_OTHER_DUPLICATE"
+])
+status = Status(
+    CLOSED='CLOSED',
+    COMPLETE='Complete',
+    CONTACTED='Contacted',
+    CONTACTED_VM='Contacted, VM',
+    DNC='DNC',
+    DOCS_RECEIVED='Docs Received',
+    DOES_NOT_MEET_EXPECTATIONS='Does not meet Expectations',
+    FUNDED='FUNDED',
+    NQ='NQ',
+    NEED_PICS='Need Pics',
+    NEW_LEAD='New Lead',
+    NEXT_STEPS='Next Steps',
+    NO_LONGER_AVAILABLE='No Longer Available',
+    NO_QUOTE='No Quote',
+    OFFER_ACCEPTED='Offer Accepted',
+    OFFER_DECLINED='Offer Declined',
+    OFFER_EXPIRED='Offer Expired',
+    OFFER_MADE='Offer Made',
+    OFFER_MADE_EXPIRED='Offer Made EXPIRED',
+    SOLD='SOLD',
+    SOLD_TO_OTHER='Sold to Other',
+    UNRESPONSIVE='Unresponsive',
+    SOLD_TO_OTHER_DUPLICATE='sold to other'
+)

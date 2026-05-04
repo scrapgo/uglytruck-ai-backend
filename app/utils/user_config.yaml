@@ -1,0 +1,22 @@
+templates:
+  missing_lead_info: "app/utils/templates/missing_lead_info_template.html"
+  conversation: "app/utils/templates/conversation_template.html"
+  complete_status: "app/utils/templates/complete_status_template.html"
+  docs_received_status: "app/utils/templates/docs_received_template.html"
+  missing_truck: "app/utils/templates/missing_truck_template.html"
+  post_acceptance_documents: "app/utils/templates/request_documents_template.html"
+  offer_made: "app/utils/templates/offer_made_template.html"
+  offer_accepted: "app/utils/templates/offer_accepted_template.html"
+
+paths:
+  mapper: "app/utils/mapper.json"
+  truck_sales_records: "app/utils/truck_sales_records.json"
+
+hardcodings:
+  emails:
+    from: []
+    to: ["dale@scrapgo.com", "kaitlin@scrapgo.com"]
+    cc: []
+  phone_numbers:
+    from: []
+    to: []

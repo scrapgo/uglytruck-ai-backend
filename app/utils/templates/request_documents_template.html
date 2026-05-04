@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Documents Ready</title>
+</head>
+
+<body style="margin:0; padding:0; background-color:#f4f6f8; font-family: Arial, Helvetica, sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td align="center" style="padding:30px 0;">
+        <table width="600" cellpadding="0" cellspacing="0"
+          style="background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#065f46; padding:18px 24px;">
+              <h2 style="margin:0; color:#ffffff; font-size:20px;">
+                Documents Ready for Signature
+              </h2>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:24px; color:#374151; font-size:14px; line-height:1.6;">
+
+              <p style="margin-top:0;">
+                Hi <strong>*|FNAME|*</strong>,
+              </p>
+
+              <p>
+                Great news! We're pleased to inform you that we have the final documents ready for your
+                <strong>*|YEAR|* *|MAKE|* *|MODEL|*</strong> truck.
+              </p>
+
+              <p>
+                Please review the attached <strong>Bill of Sale</strong> and <strong>Direct Deposit Form</strong>.
+                Once you've confirmed that all information is correct, please sign them and return them to us,
+                along with the following required documents:
+              </p>
+
+              <!-- Highlight Section -->
+              <table width="100%" cellpadding="0" cellspacing="0"
+                style="margin:20px 0; background-color:#ecfdf5; border-left:4px solid #16a34a; border-radius:6px;">
+                <tr>
+                  <td style="padding:16px;">
+                    <ul style="margin:0; padding-left:18px;">
+                      <li>Copy of the truck title</li>
+                      <li>Copy of a valid Driver’s License</li>
+                      <li>Signed Bill of Sale</li>
+                      <li>Completed Direct Deposit Form</li>
+                    </ul>
+                  </td>
+                </tr>
+              </table>
+
+              <p>
+                <strong>An electronic signature is acceptable.</strong>
+              </p>
+
+              <p>
+                Upon receiving the signed agreement and required documents,
+                {% if TRANSPORTATION == "Self Deliver" %}
+                we will immediately initiate the vehicle delivery process.
+                {% else %}
+                we will immediately initiate the vehicle pickup process.
+                {% endif %}
+              </p>
+
+              <p>
+                Please don't hesitate to reach out if you have any questions.
+              </p>
+
+              <p style="margin-bottom:0;">
+                Thank you, and have a great day!<br>
+                <strong>UglyTruck.ai Team</strong>
+              </p>
+
+              <div class="footer" style="margin-top:20px; font-size:12px; color:#6b7280; text-align:center;">
+                <p style="margin:0;">
+                  © 2025 UglyTruck.ai — Helping you sell your truck smarter, not harder.
+                </p>
+              </div>
+
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+
+</html>
