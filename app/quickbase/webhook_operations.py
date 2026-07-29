@@ -1,5 +1,6 @@
 from app.database.database import get_connection
 from app.database.queries import Queries
+import asyncpg
 
 import os
 from dotenv import load_dotenv
@@ -211,7 +212,11 @@ async def upsert_record(conn, record_id, values):
         values.get("updated_form"),
     ]
 
-    await conn.execute(insert_query, *args)
+    try:
+        await conn.execute(insert_query, *args)
+    except asyncpg.exceptions.UniqueViolationError:
+        print(f"Record {record_id} already exists, updating instead.")
+        await update_record(conn, table_name=DB_TABLE_NAME, where_key="record_id", record_id=record_id, values=values)
 
 async def update_record(conn, table_name=DB_TABLE_NAME, where_key=None, record_id=None, values=None):
     # values = dict of columns to update
