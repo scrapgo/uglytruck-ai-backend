@@ -312,6 +312,7 @@ async def webhook(request: Request):
 
 @router.post("/sendgrid/inbound")
 async def sendgrid_inbound(request: Request, background_tasks: BackgroundTasks):
+    logging.info("[SENDGRID INBOUND] 🚀 Webhook request received from SendGrid")
     try:
         form = await request.form(max_part_size=50 * 1024 * 1024)  # allow ~25MB
         payload = dict(form)
@@ -320,8 +321,11 @@ async def sendgrid_inbound(request: Request, background_tasks: BackgroundTasks):
 
         raw_email = payload.get("email")
         if not raw_email:
+            logging.error("[SENDGRID INBOUND] ❌ Missing raw email field in payload")
             raise ValueError("Missing raw email field")
 
+        logging.info(f"[SENDGRID INBOUND] 📧 Raw email payload extracted (size: {len(raw_email)} bytes)")
+        
         # 🔐 Parse RAW MIME safely
         msg = message_from_string(raw_email, policy=default)
         # Extract attachments (images + PDFs, filtered in utils)
@@ -344,9 +348,12 @@ async def sendgrid_inbound(request: Request, background_tasks: BackgroundTasks):
 
     # Extract record ID safely
     record_id = extract_record_id(subject)
+    logging.info(f"[SENDGRID INBOUND] 🆔 Extracted Record ID: {record_id} from subject: '{subject}'")
     if not record_id:
+        logging.warning("[SENDGRID INBOUND] ⚠️ No record ID found. Returning status: ignored")
         return {"status": "ignored", "reason": "No record ID"}
 
+    logging.info(f"[SENDGRID INBOUND] ⏱️ Adding heavy processing to background tasks for record_id={record_id}")
     # Start heavy processing in background to prevent SendGrid timeouts/retries
     background_tasks.add_task(
         handle_inbound_email_task,
@@ -362,6 +369,7 @@ async def sendgrid_inbound(request: Request, background_tasks: BackgroundTasks):
     return {"status": "accepted", "record_id": record_id}
 
 async def handle_inbound_email_task(record_id, from_email, to_email, subject, text_body, attachments, payload):
+    logging.info(f"[SENDGRID TASK] 🚀 Starting background task for record_id={record_id}")
     conn = await get_connection()
     try:
         # 0) Detect Bill of Sale from Dale
@@ -616,7 +624,7 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
         # (e.g. if they already existed, or if the seller is just re-sending confirmation).
         if truck_attachments:
             print(f"🔍 Running post-upload validation for record_id={record_id}")
-            logging.info(f"🔍 Running post-upload validation for record_id={record_id}")
+            logging.info(f"[SENDGRID TASK] 🔍 Running post-upload validation for record_id={record_id} with {len(truck_attachments)} attachments")
 
             try:
                 # Import validation function
@@ -912,9 +920,11 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
             )
 
         # Build conversation context for LLM and intent routing
+        logging.info(f"[SENDGRID TASK] 🧠 Building conversation context and analyzing intent for record_id={record_id}")
         conversation_text = await build_conversation(conversation_row)
         #intent = await classify_intent(body, attachments_present=bool(attachments))
         intent = _rule_based_intent(body, attachments_present=bool(attachments))
+        logging.info(f"[SENDGRID TASK] 🎯 Detected intent: '{intent}' for record_id={record_id}")
 
         # If seller asked a question, generate a reply and send it
         outbound_reply = None
@@ -979,6 +989,7 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
             att.get("filename", "document") for att in document_attachments
         ] if document_attachments else []
 
+        logging.info(f"[SENDGRID TASK] 🤖 Sending conversation to LLM for status analysis for record_id={record_id}")
         analysis_result = await analyse_conversation(
             record_id=record_id,
             conversation_text=conversation_text,
@@ -987,6 +998,7 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
             documents_count=len(document_attachments),  # Count of document attachments
             document_filenames=document_filenames,  # List of document filenames for LLM analysis
         )
+        logging.info(f"[SENDGRID TASK] ✅ LLM analysis completed for record_id={record_id}")
 
         # ← ADD THIS: Handle offer acceptance/rejection
         print(f"Handing Acceptance/Rejection for Record ID: {record_id}")
