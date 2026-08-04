@@ -310,7 +310,7 @@ async def webhook(request: Request):
     return {"status": f"Successfully !!! {event} records"}
 
 
-@router.post("/sendgrid/inbound")
+@router.post("/sendgrid/inbounds")
 async def sendgrid_inbound(request: Request, background_tasks: BackgroundTasks):
     logging.info("[SENDGRID INBOUND] 🚀 Webhook request received from SendGrid")
     try:
