@@ -318,7 +318,14 @@ async def sendgrid_inbound(request: Request, background_tasks: BackgroundTasks):
         payload = dict(form)
 
         logging.info(f"SendGrid keys: {list(payload.keys())}")
+        logging.info("Payload keys: %s", list(payload.keys()))
 
+        logging.info("===================================")
+        logging.info("FORM KEYS: %s", list(form.keys()))
+        logging.info("PAYLOAD KEYS: %s", list(payload.keys()))
+        logging.info("CONTENT TYPE: %s", request.headers.get("content-type"))
+        logging.info("===================================")
+        
         raw_email = payload.get("email")
         if not raw_email:
             logging.error("[SENDGRID INBOUND] ❌ Missing raw email field in payload")
