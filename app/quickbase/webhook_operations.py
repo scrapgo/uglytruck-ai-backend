@@ -308,7 +308,6 @@ async def upload_file_to_quickbase(
 
     payload = {
         "to": QB_TABLE_ID,
-        "mergeFieldId": QB_KEY_FIELD_ID,
         "data": [
             {
                 str(QB_KEY_FIELD_ID): {"value": record_id},
@@ -379,7 +378,6 @@ async def update_lead_info_in_quickbase(
 
     payload = {
         "to": QB_TABLE_ID,
-        "mergeFieldId": QB_KEY_FIELD_ID,
         "data": [
             {
                 str(QB_KEY_FIELD_ID): {"value": record_id},
