@@ -1,4 +1,5 @@
 import os
+import logging
 import asyncpg
 from fastapi import APIRouter, HTTPException
 import httpx
@@ -134,6 +135,7 @@ async def data_validator():
 
 @router.post("/webhook-data-validator")
 async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=False, set_received_documents: bool=False):
+    logging.info(f"[EMAIL-FLOW][Validator] ▶ Starting webhook_data_validator for record_id={record_id} | set_missing_truck_none={set_missing_truck_none}")
 
     conn = await get_connection()
 
@@ -149,12 +151,14 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
 
         resp = await client.get(FETCH_TABLE_URL, params=params)
         if resp.status_code != 200:
+            logging.error(f"[EMAIL-FLOW][Validator] ❌ DB fetch failed for record_id={record_id}: {resp.text}")
             raise HTTPException(status_code=500, detail=f"Fetch failed: {resp.text}")
 
         records = resp.json().get("data", [])
-        print("Records fetched:", len(records))
+        logging.info(f"[EMAIL-FLOW][Validator] Fetched {len(records)} record(s) for record_id={record_id}")
 
         if not records:
+            logging.warning(f"[EMAIL-FLOW][Validator] ⚠️ No records found in DB for record_id={record_id}")
             return {"message": "No records found needing pictures."}
 
         # Limit if hard-coded testing is enabled
@@ -184,7 +188,7 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
 
             # Only run the lead-info completeness check if flag is not yet set
             if not lead_info_flag:
-                print(f"Record {rec['id']}: running lead info validation")
+                logging.info(f"[EMAIL-FLOW][Validator] 🔍 Checking lead info completeness for record_id={record_id} (lead_info_flag not set)")
                 missing_info_labels = [
                     label
                     for field, label in required_fields.items()
@@ -197,9 +201,9 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
                     comm_subject.append("missing_lead_info")
                     skip_image_validation = True
                     missing_views_result = []  # No missing views when lead info is missing
-                    print(
-                        f"Record {rec['id']}: Missing required lead fields {missing_info_labels} "
-                        f"→ status=1, subject=missing_lead_info (skipping image validation)"
+                    logging.warning(
+                        f"[EMAIL-FLOW][Validator] ⚠️ record_id={record_id}: Missing required lead fields: {missing_info_labels} "
+                        f"→ communication_status=1, subject=missing_lead_info (skipping image validation)"
                     )
                 else:
                     # All required lead info present → mark flag = 1 and update status to "Need Pics"
@@ -215,18 +219,23 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
                     # Update Quickbase status to "Need Pics" when lead info is complete
                     from app.communication.conversation_repository import update_quickbase_status
                     await update_quickbase_status(rec["record_id"], "Need Pics")
-                    print(
-                        f"Record {rec['id']}: All required lead info present → "
-                        f"lead_information_received=1, status updated to 'Need Pics'"
+                    logging.info(
+                        f"[EMAIL-FLOW][Validator] ✅ record_id={record_id}: All required lead info present → "
+                        f"lead_information_received=1, QB status updated to 'Need Pics'"
                     )
+            else:
+                logging.info(f"[EMAIL-FLOW][Validator] ⏭️  lead_information_received already set for record_id={record_id}, skipping lead info check")
 
             # If lead info is incomplete, skip image validation and go straight to DB updates
             if not skip_image_validation:
                 # ---- Delegate image validation to separate module ----
                 if not set_missing_truck_none:
+                    logging.info(f"[EMAIL-FLOW][Validator] 📸 Running image validation for record_id={record_id}")
                     image_urls, missing_views = await validate_images(rec, GPT_VISION_URL)
+                    logging.info(f"[EMAIL-FLOW][Validator] Image validation result for record_id={record_id}: found={len(image_urls) if image_urls else 0} image(s), missing_views={missing_views}")
                     missing_views_result = missing_views  # Store for return
                 else:
+                    logging.info(f"[EMAIL-FLOW][Validator] ⏭️  set_missing_truck_none=True → skipping image validation for record_id={record_id}")
                     image_urls = True  # If we need to skip validation forcefully
                     missing_views = None
                     missing_views_result = []  # Empty list when set_missing_truck_none is True
@@ -234,27 +243,29 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
                 if not image_urls:
                     new_status = 1   # Email MUST be sent
                     comm_subject.append('missing_truck')
-                    print(f"Record {rec['id']}: No images → status=1")
+                    logging.info(f"[EMAIL-FLOW][Validator] 🚛 record_id={record_id}: No images found → communication_status=1, subject=missing_truck")
 
                 elif missing_views:
                     new_status = 1   # Email MUST be sent
                     comm_subject.append('missing_truck')
-                    print(f"Record {rec['id']}: Missing views {missing_views} → status=1")
+                    logging.info(f"[EMAIL-FLOW][Validator] 🚛 record_id={record_id}: Missing views {missing_views} → communication_status=1, subject=missing_truck")
 
                 else:
                     new_status = 1   # email needed for requesting documents
-                    print(f"Record {rec['id']}: All views OK → status=2")
                     comm_subject.append('complete_status')
+                    logging.info(f"[EMAIL-FLOW][Validator] ✅ record_id={record_id}: All views present → communication_status=1, subject=complete_status")
 
             if rec['truck_view_pics_received_confirmation']:
                 if 'missing_truck' in comm_subject:
                     comm_subject.remove('missing_truck')
+                    logging.info(f"[EMAIL-FLOW][Validator] 📸 record_id={record_id}: truck_view_pics_received_confirmation=True → removed 'missing_truck' from subject")
 
 
             if rec['documents_received_confirmation']:
                 if 'missing_truck' in comm_subject:
                     comm_subject.remove('missing_truck')
                 comm_subject = ['complete_status']
+                logging.info(f"[EMAIL-FLOW][Validator] 📄 record_id={record_id}: documents_received_confirmation=True → forced subject='complete_status'")
             # Additional business rule: If record has manual status override
             # record_status = (rec.get("status") or "").strip().lower()
             #
@@ -262,25 +273,19 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
             #     new_status = 1  # Force send email
             #     comm_subject.append(STATUS_SUBJECT_MAP[record_status])
 
-            print(f"[{rec['id']}] Final Communication Subject → {comm_subject}")
+            logging.info(f"[EMAIL-FLOW][Validator] 📋 record_id={record_id}: Final communication_subject='{comm_subject}'")
 
             # If requesting documents, also update status to "Need Pics" if not already set
             if 'complete_status' in comm_subject:
                 if 'missing_truck' in comm_subject:
                     comm_subject.remove('missing_truck')
                 from app.communication.conversation_repository import update_lead_status_pg, update_quickbase_status
-                # Update both PostgreSQL and Quickbase - update_lead_status_pg will send alert and update Quickbase
+                logging.info(f"[EMAIL-FLOW][Validator] 🏁 Transitioning record_id={record_id} to 'Complete' in DB and QB")
                 await update_lead_status_pg(rec["record_id"], "Complete")
 
             # ---- Update DB ----
-            # Avoid resetting status to 1 (Required) if we already sent the exact same subjects (status 3)
-            current_comm_status = str(rec.get("communication_status") or "0")
-            current_comm_subject = rec.get("communication_subject") or ""
             new_comm_subject_str = ','.join(comm_subject)
-
-            if current_comm_status == "3" and new_comm_subject_str == current_comm_subject:
-                print(f"ℹ️ Subject '{new_comm_subject_str}' already sent (status 3) for record_id={rec['id']}. Maintaining status 3.")
-                new_status = 3
+            logging.info(f"[EMAIL-FLOW][Validator] 💾 Updating DB for record_id={record_id}: communication_status={new_status}, communication_subject='{new_comm_subject_str}'")
 
             update_communication_status = Queries.UPDATE_RECORD.format(
                 table_name=DB_TABLE_NAME,
@@ -295,8 +300,9 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
             await conn.fetchrow(update_communication_status, new_status, rec["id"])
             if comm_subject:
                 await conn.fetchrow(update_communication_subject, new_comm_subject_str, rec["id"])
-            print(f"✔ Updated communication_status={new_status} for ID={rec['id']}")
+            logging.info(f"[EMAIL-FLOW][Validator] ✅ DB updated: communication_status={new_status}, communication_subject='{new_comm_subject_str}' for record_id={record_id}")
 
+    logging.info(f"[EMAIL-FLOW][Validator] ✅ webhook_data_validator complete for record_id={record_id}. Returning missing_views={missing_views_result}")
     return {
         "message": "Image validation completed",
         "missing_views": missing_views_result if missing_views_result is not None else []
@@ -323,10 +329,16 @@ async def webhook_call_agent(
         set_received_documents: Flag for document handling
         missing_views: List of missing truck views (from webhook_data_validator)
     """
+    logging.info(
+        f"[EMAIL-FLOW][Agent] ▶ Starting webhook_call_agent for record_id={record_id} | "
+        f"set_missing_truck_none={set_missing_truck_none}, set_received_documents={set_received_documents}, "
+        f"missing_views={missing_views}, has_attachments={bool(attachments)}"
+    )
     conn = await get_connection()
     async with httpx.AsyncClient(timeout=60) as client:
         # 1️⃣ Fetch records from DB
         if set_received_documents:
+            logging.info(f"[EMAIL-FLOW][Agent] 📄 set_received_documents=True for record_id={record_id} → updating comm_status=1, subject='docs_received_status'")
             update_communication_status = Queries.UPDATE_RECORD.format(
                 table_name=DB_TABLE_NAME,
                 set_clause="communication_status",
@@ -345,6 +357,7 @@ async def webhook_call_agent(
             await conn.fetchrow(update_communication_status, 1, int(record_id))
             await conn.fetchrow(update_communication_subject, 'docs_received_status', int(record_id))
             await conn.fetchrow(update_docs_received, 1, int(record_id))
+            logging.info(f"[EMAIL-FLOW][Agent] DB updated (docs_received path) for record_id={record_id}")
         params = {
             "table_name": DB_TABLE_NAME,
             "where_key": "record_id",
@@ -353,11 +366,13 @@ async def webhook_call_agent(
         }
         resp = await client.get(FETCH_TABLE_URL, params=params)
         if resp.status_code != 200:
+            logging.error(f"[EMAIL-FLOW][Agent] ❌ DB fetch failed for record_id={record_id}: {resp.text}")
             raise HTTPException(status_code=500, detail=f"Fetch failed: {resp.text}")
 
         records = resp.json().get("data", [])
-        print("Records fetched:", len(records))
+        logging.info(f"[EMAIL-FLOW][Agent] Fetched {len(records)} record(s) for record_id={record_id}")
         if not records:
+            logging.warning(f"[EMAIL-FLOW][Agent] ⚠️ No records in DB for record_id={record_id}. Aborting email dispatch.")
             return {"message": "No records found needing pictures."}
 
         processed = []
@@ -367,12 +382,18 @@ async def webhook_call_agent(
             sample_records = len(records)
 
         for rec in records[:sample_records]:
+            logging.info(
+                f"[EMAIL-FLOW][Agent] Processing record_id={record_id}: "
+                f"status='{rec.get('status')}', comm_status={rec.get('communication_status')}, "
+                f"comm_subject='{rec.get('communication_subject')}', email='{rec.get('seller_email')}'"
+            )
             # Use missing_views from webhook_data_validator
             # If set_missing_truck_none is True, use empty list, otherwise use the passed missing_views
             if set_missing_truck_none:
                 missing_views_for_email = []
             else:
                 missing_views_for_email = missing_views if missing_views is not None else []
+            logging.info(f"[EMAIL-FLOW][Agent] missing_views_for_email={missing_views_for_email} for record_id={record_id}")
 
             # If this communication is about missing lead info, compute exactly which fields are missing
             comm_subject_str = (rec.get("communication_subject") or "") or ""
@@ -415,8 +436,13 @@ async def webhook_call_agent(
                     ATTACHMENTS=attachments,
                     TRANSPORTATION=rec.get("transportation"),
                 )
+                logging.info(
+                    f"[EMAIL-FLOW][Agent] 📦 TruckEmailData built for record_id={record_id}: "
+                    f"to='{rec.get('seller_email')}', fname='{truck_mail_item.FNAME}', "
+                    f"status='{rec.get('status')}', subject='{rec.get('communication_subject')}'"
+                )
             except Exception as e:
-                print(f"⚠️ Skipping record due to error: {e}")
+                logging.error(f"[EMAIL-FLOW][Agent] ❌ Failed to build TruckEmailData for record_id={record_id}: {e}")
                 continue
 
             if rec.get("status") == "Offer Made":
@@ -492,9 +518,16 @@ async def webhook_call_agent(
                 # 🛑 Check missing_truck_email_count to break potential endless loops
                 comm_subject_str = (rec.get("communication_subject") or "")
                 missing_truck_count = int(rec.get("missing_truck_email_count") or 0)
+                logging.info(
+                    f"[EMAIL-FLOW][Agent] 📧 Email dispatch triggered for record_id={record_id}: "
+                    f"comm_subject='{comm_subject_str}', missing_truck_email_count={missing_truck_count}"
+                )
 
                 if "missing_truck" in comm_subject_str and missing_truck_count >= 2:
-                    print(f"⚠️ Record {rec['record_id']}: missing_truck_email_count={missing_truck_count} >= 2. Forwarding to Dale instead of seller.")
+                    logging.warning(
+                        f"[EMAIL-FLOW][Agent] ⚠️ record_id={record_id}: missing_truck_email_count={missing_truck_count} >= 2. "
+                        f"Forwarding to Dale instead of seller (loop-break)."
+                    )
                     
                     # 1. Accumulate all images from local storage
                     accumulated_attachments = []
@@ -532,6 +565,7 @@ async def webhook_call_agent(
                         subject=f"Manual Intervention Required: Missing Truck Loop - REF ID: {rec['record_id']}",
                         attachments=accumulated_attachments if accumulated_attachments else attachments
                     )
+                    logging.info(f"[EMAIL-FLOW][Agent] 📨 Dale alerted (manual_intervention) for record_id={rec['record_id']} with {len(accumulated_attachments)} accumulated photos")
                     
                     # 2. Update status to 2 (Email not required) to stop the loop
                     update_comm_status = Queries.UPDATE_RECORD.format(
@@ -582,11 +616,15 @@ async def webhook_call_agent(
                             att["content"] = base64.b64encode(att["content"]).decode("ascii")
 
                 # 2️⃣ Send email via SendGrid
-                print("MAIL TRIGGERED BY **Webhook Call Agent**")
+                logging.info(
+                    f"[EMAIL-FLOW][Agent] 🚀 Sending email via SendGrid for record_id={record_id}: "
+                    f"endpoint={SENDGRID_ENDPOINT}, to='{rec.get('seller_email')}', subject_key='{comm_subject_str}'"
+                )
                 endpoint_output = await client.post(SENDGRID_ENDPOINT, json=truck_mail_payload)
-                print(endpoint_output)
+                logging.info(f"[EMAIL-FLOW][Agent] SendGrid response for record_id={record_id}: status={endpoint_output.status_code}")
 
                 if endpoint_output.status_code == 200:
+                    logging.info(f"[EMAIL-FLOW][Agent] ✅ Email sent successfully for record_id={record_id}. Marking communication_status=3.")
                     # 2️⃣ Mark communication_status = 3 (Email Sent)
                     query = Queries.UPDATE_RECORD.format(
                         table_name=DB_TABLE_NAME,
@@ -603,7 +641,7 @@ async def webhook_call_agent(
                             where_key="id"
                         )
                         await conn.fetchrow(update_count_query, missing_truck_count + 1, rec["id"])
-                        print(f"📈 Incremented missing_truck_email_count to {missing_truck_count + 1} for ID={rec['id']}")
+                        logging.info(f"[EMAIL-FLOW][Agent] 📈 Incremented missing_truck_email_count to {missing_truck_count + 1} for record_id={record_id}")
 
                     # 5️⃣ Store outbound email in conversation history
                     response_json = endpoint_output.json()
@@ -614,43 +652,26 @@ async def webhook_call_agent(
                         "body": response_json["body"]
                     }
                     await store_conversation_message(data, direction='outbound')
-                    #
-                    # # 4️⃣ Trigger SMS to notify seller about the email
-                    # try:
-                    #     sms_payload = {
-                    #         "phone_number": rec["seller_phone"],
-                    #         "FNAME": rec["last_name"],
-                    #         "MAKE": rec["seller_make"],
-                    #         "MODEL": rec["model"],
-                    #         "CITY": rec["location_city"],
-                    #         "STATUS": rec["status"],
-                    #     }
-                    #     truck_sms_item = SMSRequest(
-                    #         RECORD_ID=rec["record_id"],
-                    #         PHONE_NUMBER=rec["seller_phone"],
-                    #         FNAME=rec["last_name"],
-                    #         MAKE=rec["seller_make"],
-                    #         MODEL=rec["model"],
-                    #         CITY=rec["location_city"],
-                    #         STATUS=rec["status"],
-                    #     )
-                    #     sms_resp = await client.post(SEND_SMS_URL, json=truck_sms_item.dict())
-                    #     print(f"SMS response: {sms_resp.status_code} - {sms_resp.text}")
-                    # except Exception as sms_err:
-                    #     # Don't fail the whole flow if SMS fails; just log it.
-                    #     print(f"⚠️ Failed to send SMS notification for record {rec['record_id']}: {sms_err}")
+                    logging.info(f"[EMAIL-FLOW][Agent] 🗨️ Outbound email stored in conversation history for record_id={record_id}")
                 else:
+                    logging.error(
+                        f"[EMAIL-FLOW][Agent] ❌ SendGrid email dispatch FAILED for record_id={record_id}: "
+                        f"status={endpoint_output.status_code}, body={endpoint_output.text[:300]}"
+                    )
                     raise HTTPException(status_code=500, detail=f"Sending Mail Failed...")
 
 
             elif rec["communication_status"] == "2" or rec["communication_status"] == 2:
+                logging.info(f"[EMAIL-FLOW][Agent] ⏭️  communication_status=2 for record_id={record_id} — no email needed. Skipping.")
                 continue
 
             else:
+                logging.info(f"[EMAIL-FLOW][Agent] ⏭️  communication_status={rec.get('communication_status')} for record_id={record_id} — not actionable. Skipping.")
                 if rec["communication_status"] == "0" or rec["communication_status"] == 0:
                     # YET TO IMPLEMENT
                     pass
 
+        logging.info(f"[EMAIL-FLOW][Agent] ✅ webhook_call_agent completed for record_id={record_id}")
         return {"message":"Successfully sent emails !!!"}
 
 @router.post("/init")

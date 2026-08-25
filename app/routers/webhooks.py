@@ -120,19 +120,37 @@ async def webhook(request: Request):
     conn = await get_connection()
 
     if event == "Add":
+        logging.info(f"[EMAIL-FLOW][Add] ▶ Received Add event for record_id={record_id}")
         # Pre-processing
         clean_values = preprocess_values(values)
-        print("Clean Values:",clean_values)
+        logging.info(f"[EMAIL-FLOW][Add] Preprocessed values for record_id={record_id}: status={clean_values.get('status')}, email={clean_values.get('seller_email')}, phone={clean_values.get('seller_phone')}")
         await upsert_record(conn, record_id, clean_values)
-        if clean_values.get('status') in ["New Lead", "Need Pics"]:
+        logging.info(f"[EMAIL-FLOW][Add] DB upsert complete for record_id={record_id}")
+
+        # Always reset communication state so previously-processed records
+        # (status=3) are treated as fresh and the full email flow runs again.
+        await conn.execute(
+            f'UPDATE "{DB_TABLE_NAME}" SET communication_status = 0, communication_subject = NULL WHERE record_id = $1',
+            int(record_id)
+        )
+        logging.info(f"[EMAIL-FLOW][Add] ♻️  Reset communication_status=0 and communication_subject=NULL for record_id={record_id}")
+
+        incoming_status = clean_values.get('status')
+        if incoming_status in ["New Lead", "Need Pics"]:
+            logging.info(f"[EMAIL-FLOW][Add] Status='{incoming_status}' → calling webhook_data_validator for record_id={record_id}")
             validator_result = await webhook_data_validator(record_id)
             missing_views = validator_result.get("missing_views", []) if validator_result else []
+            logging.info(f"[EMAIL-FLOW][Add] Validator returned missing_views={missing_views} for record_id={record_id}")
+            logging.info(f"[EMAIL-FLOW][Add] 📧 Calling webhook_call_agent for record_id={record_id} with missing_views={missing_views}")
             await webhook_call_agent(record_id, missing_views=missing_views)
+            logging.info(f"[EMAIL-FLOW][Add] ✅ webhook_call_agent completed for record_id={record_id}")
         else:
+            logging.info(f"[EMAIL-FLOW][Add] Status='{incoming_status}' → calling webhook_call_agent (docs path) for record_id={record_id}")
             await webhook_call_agent(record_id, set_missing_truck_none=True, set_received_documents=True)
+            logging.info(f"[EMAIL-FLOW][Add] ✅ webhook_call_agent (docs path) completed for record_id={record_id}")
 
     elif event == "Replace":
-        print("We are at Replace event")
+        logging.info(f"[EMAIL-FLOW][Replace] ▶ Received Replace event for record_id={record_id}")
         
         # Fetch old status FIRST to check if this is just a file upload webhook
         old_record = await conn.fetchrow(
@@ -142,7 +160,7 @@ async def webhook(request: Request):
         old_email = old_record["seller_email"] if old_record else None
         old_phone = old_record["seller_phone"] if old_record else None
         old_transportation_status = old_record["transportation"] if old_record else None
-        print(f"OLD STATUS FOR RECORD ID: {int(record_id)} is {old_status}")
+        logging.info(f"[EMAIL-FLOW][Replace] DB snapshot → status='{old_status}', email='{old_email}', phone='{old_phone}', transportation='{old_transportation_status}' for record_id={record_id}")
         
         clean_values = preprocess_values(values)
         new_status = clean_values.get("status", old_status)
@@ -192,40 +210,41 @@ async def webhook(request: Request):
             values=clean_values
         )
         
-        print(f"NEW STATUS FOR RECORD ID: {clean_values.get('record_id', record_id)} is {new_status}")
+        logging.info(f"[EMAIL-FLOW][Replace] Incoming new values → status='{new_status}', email='{new_email}', phone='{new_phone}', transportation='{new_transportation_status}' for record_id={record_id}")
         
         if old_status != new_status or old_email != new_email or old_phone != new_phone or old_transportation_status != new_transportation_status:
             if old_status != new_status:
-                print(f"Status changed from '{old_status}' to '{new_status}'")
+                logging.info(f"[EMAIL-FLOW][Replace] 🔄 Status changed: '{old_status}' → '{new_status}' for record_id={record_id}")
             elif old_email != new_email:
-                print(f"Email changed from '{old_email}' to '{new_email}'")
+                logging.info(f"[EMAIL-FLOW][Replace] 🔄 Email changed: '{old_email}' → '{new_email}' for record_id={record_id}")
             elif old_phone != new_phone:
-                print(f"Phone changed from '{old_phone}' to '{new_phone}'")
+                logging.info(f"[EMAIL-FLOW][Replace] 🔄 Phone changed: '{old_phone}' → '{new_phone}' for record_id={record_id}")
             elif old_transportation_status != new_transportation_status:
-                print(f"Transportation status changed from '{old_transportation_status}' to '{new_transportation_status}'")
-            else:
-                pass
-            # if not old_record['communication_subject']:
-            print(f"NOW TRIGGERING webhook_data_validator for record_id={record_id} for validation")
+                logging.info(f"[EMAIL-FLOW][Replace] 🔄 Transportation changed: '{old_transportation_status}' → '{new_transportation_status}' for record_id={record_id}")
+            logging.info(f"[EMAIL-FLOW][Replace] ▶ Change detected — routing to email handler for record_id={record_id}, new_status='{new_status}'")
             if new_status in ['New Lead', 'Need Pics']:
+                logging.info(f"[EMAIL-FLOW][Replace] 📋 Status='{new_status}' → calling webhook_data_validator for record_id={record_id}")
                 validator_result = await webhook_data_validator(record_id)
                 missing_views = validator_result.get("missing_views", []) if validator_result else []
-                # Now actually send the email - the validator just set the DB flags, we need the agent
+                logging.info(f"[EMAIL-FLOW][Replace] Validator returned missing_views={missing_views} for record_id={record_id}")
+                logging.info(f"[EMAIL-FLOW][Replace] 📧 Calling webhook_call_agent for record_id={record_id} with missing_views={missing_views}")
                 await webhook_call_agent(record_id, missing_views=missing_views)
+                logging.info(f"[EMAIL-FLOW][Replace] ✅ webhook_call_agent completed for record_id={record_id}")
+
             elif new_status == 'Complete':
-                # Force status to 1 and subject to complete_status via validator (bypassing GPT validation)
-                # NOTE: webhook_data_validator → update_lead_status_pg already sends the Dale alert
-                #       internally. Do NOT call send_alert_to_dale here to avoid duplicates.
+                logging.info(f"[EMAIL-FLOW][Replace] 🏁 Status='Complete' → running validator (bypass GPT) then sending seller email for record_id={record_id}")
                 await webhook_data_validator(record_id, set_missing_truck_none=True)
-                
-                # Trigger internal agent flow (sends the seller email)
+                logging.info(f"[EMAIL-FLOW][Replace] Validator done (Complete path) for record_id={record_id}. Calling webhook_call_agent.")
                 await webhook_call_agent(record_id, set_missing_truck_none=True)
+                logging.info(f"[EMAIL-FLOW][Replace] ✅ Complete email flow finished for record_id={record_id}")
             
             elif new_status == 'Offer Made':
-                # Trigger offer email to seller (webhook_call_agent forces 'offer_made' subject)
+                logging.info(f"[EMAIL-FLOW][Replace] 💰 Status='Offer Made' → sending offer email to seller for record_id={record_id}")
                 await webhook_call_agent(record_id, set_missing_truck_none=True)
+                logging.info(f"[EMAIL-FLOW][Replace] ✅ Offer Made email dispatched for record_id={record_id}")
 
             elif new_status == 'Offer Accepted':
+                logging.info(f"[EMAIL-FLOW][Replace] 🤝 Status='Offer Accepted' → alerting Dale (no seller email until BOS received) for record_id={record_id}")
                 # ── No email sent to seller on manual status change ─────────────────────
                 # The post_acceptance_documents email is ONLY triggered when Dale sends
                 # the "Seller Bill of Sale NEW" attachment via /sendgrid/inbound (already
@@ -244,21 +263,21 @@ async def webhook(request: Request):
                         offer_price_qa = seller_row_qa.get("offer_price", "N/A")
                         vin_qa = seller_row_qa.get("vin", "N/A")
                         alert_message_qa = f"Offer of ${offer_price_qa} is Accepted by seller {seller_name_qa} (VIN# {vin_qa}). I have requested the documents from the seller. I will forward those documents once received."
+                        logging.info(f"[EMAIL-FLOW][Replace] Sending 'Offer Accepted' Dale alert for record_id={record_id}: seller='{seller_name_qa}', offer=${offer_price_qa}, vin={vin_qa}")
                         await send_alert_to_dale(
                             record_id=int(record_id),
                             alert_type="offer_accepted",
                             message=alert_message_qa
                         )
-                        logging.info(
-                            f"\U0001f4e8 Alerted Dale about manual 'Offer Accepted' for "
-                            f"record_id={record_id}. Awaiting BOS attachment to trigger document request."
-                        )
+                        logging.info(f"[EMAIL-FLOW][Replace] 📨 Dale alerted (Offer Accepted) for record_id={record_id}. Awaiting BOS attachment.")
+                    else:
+                        logging.warning(f"[EMAIL-FLOW][Replace] ⚠️ No DB row found for record_id={record_id} when sending Offer Accepted alert")
                 except Exception as e:
-                    logging.exception(f"\u26a0\ufe0f Failed to send alert to Dale for record_id={record_id}: {e}")
+                    logging.exception(f"[EMAIL-FLOW][Replace] ⚠️ Failed to send Offer Accepted alert to Dale for record_id={record_id}: {e}")
 
             elif new_status == 'Offer Declined':
+                logging.info(f"[EMAIL-FLOW][Replace] ❌ Status='Offer Declined' → alerting Dale for record_id={record_id}")
                 # ── Mirror exactly what handle_inbound_email_task does ──────────────────
-                # 1) Alert Dale with the same message as the automated path
                 try:
                     from app.communication.conversation_repository import send_alert_to_dale
                     seller_row_od = await conn.fetchrow(
@@ -273,33 +292,31 @@ async def webhook(request: Request):
                         offer_price_od = seller_row_od["offer_price"]
                         vin_od = seller_row_od.get("vin", "")
                         message_od = f"The offer of ${offer_price_od} has been declined by the seller, {seller_name_od} (VIN# {vin_od}). Further negotiation may be required."
+                        logging.info(f"[EMAIL-FLOW][Replace] Sending 'Offer Declined' Dale alert for record_id={record_id}: seller='{seller_name_od}', offer=${offer_price_od}, vin={vin_od}")
                         await send_alert_to_dale(
                             record_id=int(record_id),
                             alert_type="offer_rejected",
                             message=message_od
                         )
-                        logging.info(
-                            f"📨 Alerted Dale about manual 'Offer Declined' for "
-                            f"record_id={record_id}."
-                        )
+                        logging.info(f"[EMAIL-FLOW][Replace] 📨 Dale alerted (Offer Declined) for record_id={record_id}")
+                    else:
+                        logging.warning(f"[EMAIL-FLOW][Replace] ⚠️ No DB row found for record_id={record_id} when sending Offer Declined alert")
                 except Exception as e:
-                    logging.exception(f"⚠️ Failed to process manual 'Offer Declined' for record_id={record_id}: {e}")
+                    logging.exception(f"[EMAIL-FLOW][Replace] ⚠️ Failed to process manual 'Offer Declined' for record_id={record_id}: {e}")
             else:
+                logging.info(f"[EMAIL-FLOW][Replace] 📄 Status='{new_status}' → docs path for record_id={record_id}")
                 await webhook_call_agent(record_id, set_missing_truck_none=True, set_received_documents=True)
+                logging.info(f"[EMAIL-FLOW][Replace] ✅ Docs path agent completed for record_id={record_id}")
             # else:
             #     # Since communication subject is already present, means, its more than first time communication happending hence, disabling validation
             #     print("Since communication subject is already present, means, its more than first time communication happending hence, disabling validation")
             #     print(f"RECORD ID: {record_id} has already been validated")
 
         else:
-            if old_status == new_status:
-                print(f"Status unchanged ('{old_status}'), skipping validation")
-            elif old_email == new_email:
-                print(f"Email unchanged ('{old_email}'), skipping validation")
-            elif old_phone == new_phone:
-                print(f"Phone unchanged ('{old_phone}'), skipping validation")
-            else:
-                pass
+            logging.info(
+                f"[EMAIL-FLOW][Replace] ⏭️  No actionable change detected for record_id={record_id} — "
+                f"status='{new_status}', email='{new_email}', phone='{new_phone}'. Skipping email flow."
+            )
 
 
     elif event == "Delete":

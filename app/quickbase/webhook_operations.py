@@ -1,6 +1,7 @@
 from app.database.database import get_connection
 from app.database.queries import Queries
 import asyncpg
+import logging
 
 import os
 from dotenv import load_dotenv
@@ -214,9 +215,22 @@ async def upsert_record(conn, record_id, values):
 
     try:
         await conn.execute(insert_query, *args)
+        print(f"[upsert_record] ✅ New entry created for record_id={record_id}")
     except asyncpg.exceptions.UniqueViolationError:
-        print(f"Record {record_id} already exists, updating instead.")
-        await update_record(conn, table_name=DB_TABLE_NAME, where_key="record_id", record_id=record_id, values=values)
+        # Repeated seller: archive the old row by nullifying its record_id,
+        # then insert a fresh new entry so the full email flow runs clean.
+        logging.warning(
+            f"[upsert_record] ⚠️ record_id={record_id} already exists in DB. "
+            f"Archiving old entry (setting record_id=NULL) and inserting new entry."
+        )
+        await conn.execute(
+            f'UPDATE "{DB_TABLE_NAME}" SET record_id = NULL WHERE record_id = $1',
+            int(record_id)
+        )
+        logging.info(f"[upsert_record] 🗃️ Old entry for record_id={record_id} archived (record_id set to NULL).")
+        # Now insert the fresh row
+        await conn.execute(insert_query, *args)
+        logging.info(f"[upsert_record] ✅ New fresh entry created for repeated record_id={record_id}")
 
 async def update_record(conn, table_name=DB_TABLE_NAME, where_key=None, record_id=None, values=None):
     # values = dict of columns to update
