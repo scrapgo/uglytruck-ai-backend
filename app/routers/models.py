@@ -96,7 +96,16 @@ async def _fetch_image(
         while True:
             attempt += 1
             elapsed_time = time.monotonic() - start_time
-            resp = await client.get(complete_url, headers=download_headers)
+            
+            # For external URLs (e.g. WordPress/uglytruck.net), don't pass Quickbase auth headers
+            if "quickbase.com" not in complete_url.lower() and complete_url.startswith("http"):
+                req_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+            else:
+                req_headers = download_headers
+
+            resp = await client.get(complete_url, headers=req_headers)
 
             if resp.status_code == 200:
                 if attempt > 1:

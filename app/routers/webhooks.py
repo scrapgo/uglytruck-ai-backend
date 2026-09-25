@@ -123,6 +123,23 @@ async def webhook(request: Request):
         logging.info(f"[EMAIL-FLOW][Add] ▶ Received Add event for record_id={record_id}")
         # Pre-processing
         clean_values = preprocess_values(values)
+
+        # Check if photos are missing from webhook payload; if so, fetch directly from Quickbase (including website photo URLs)
+        from app.validators.image_validation import PHOTO_FIELD_MAP
+        has_any_photos = any(clean_values.get(k) for k in PHOTO_FIELD_MAP)
+        if not has_any_photos:
+            from app.quickbase.webhook_operations import get_record_photo_status
+            logging.info(f"[EMAIL-FLOW][Add] 🔍 No photos in webhook payload. Checking Quickbase photo and website fields for record_id={record_id}...")
+            try:
+                qb_photos = await get_record_photo_status(int(record_id))
+                if qb_photos:
+                    for k, v in qb_photos.items():
+                        if v and not clean_values.get(k):
+                            clean_values[k] = v
+                    logging.info(f"[EMAIL-FLOW][Add] 📸 Retrieved photo values from Quickbase for record_id={record_id}: {[k for k, v in qb_photos.items() if v]}")
+            except Exception as e:
+                logging.warning(f"[EMAIL-FLOW][Add] ⚠️ Could not fetch photos from Quickbase for record_id={record_id}: {e}")
+
         logging.info(f"[EMAIL-FLOW][Add] Preprocessed values for record_id={record_id}: status={clean_values.get('status')}, email={clean_values.get('seller_email')}, phone={clean_values.get('seller_phone')}")
         await upsert_record(conn, record_id, clean_values)
         logging.info(f"[EMAIL-FLOW][Add] DB upsert complete for record_id={record_id}")

@@ -255,13 +255,13 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
                     comm_subject.append('complete_status')
                     logging.info(f"[EMAIL-FLOW][Validator] ✅ record_id={record_id}: All views present → communication_status=1, subject=complete_status")
 
-            if rec['truck_view_pics_received_confirmation']:
+            if rec.get('truck_view_pics_received_confirmation'):
                 if 'missing_truck' in comm_subject:
                     comm_subject.remove('missing_truck')
                     logging.info(f"[EMAIL-FLOW][Validator] 📸 record_id={record_id}: truck_view_pics_received_confirmation=True → removed 'missing_truck' from subject")
 
 
-            if rec['documents_received_confirmation']:
+            if rec.get('documents_received_confirmation'):
                 if 'missing_truck' in comm_subject:
                     comm_subject.remove('missing_truck')
                 comm_subject = ['complete_status']

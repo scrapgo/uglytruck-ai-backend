@@ -54,6 +54,14 @@ def preprocess_values(values: dict):
         "photo_cab", "photo_engine_passenger_side",
         "photo_exterior_front", "photo_exterior_passenger_side",
         "photo_exterior_rear", "copy_photo_exterior_driver_side",
+        "photo_exterior_driver_side_from_website", "photo_engine_driver_side_from_website",
+        "photo_cab_from_website", "photo_engine_passenger_side_from_website",
+        "photo_exterior_front_from_website", "photo_exterior_passenger_side_from_website",
+        "photo_exterior_rear_from_website",
+        "Photo Exterior Driver Side from website", "Photo Engine Driver Side from website",
+        "Photo Cab from website", "Photo Engine Passenger Side from website",
+        "Photo Exterior Front from website", "Photo Exterior Passenger Side from website",
+        "Photo Exterior Rear from website",
         "scrapgo_logo", "print_pdf", "add_note",
         "user_name", "status", "pick_up_address", "pickup_contact",
         "pickup_phone", "alternative_contact", "alternative_phone",
@@ -145,6 +153,38 @@ def preprocess_values(values: dict):
 
         # DEFAULT fallback
         processed[key] = value
+
+    # Automatically map 'Photo ... from website' values to standard photo columns if not already populated
+    website_photo_map = {
+        "Photo Exterior Driver Side from website": "photo_exterior_driver_side",
+        "Photo Engine Driver Side from website": "photo_engine_driver_side",
+        "Photo Cab from website": "photo_cab",
+        "Photo Engine Passenger Side from website": "photo_engine_passenger_side",
+        "Photo Exterior Front from website": "photo_exterior_front",
+        "Photo Exterior Passenger Side from website": "photo_exterior_passenger_side",
+        "Photo Exterior Rear from website": "photo_exterior_rear",
+        "photo_exterior_driver_side_from_website": "photo_exterior_driver_side",
+        "photo_engine_driver_side_from_website": "photo_engine_driver_side",
+        "photo_cab_from_website": "photo_cab",
+        "photo_engine_passenger_side_from_website": "photo_engine_passenger_side",
+        "photo_exterior_front_from_website": "photo_exterior_front",
+        "photo_exterior_passenger_side_from_website": "photo_exterior_passenger_side",
+        "photo_exterior_rear_from_website": "photo_exterior_rear",
+        "163": "photo_exterior_driver_side",
+        "164": "photo_engine_driver_side",
+        "165": "photo_cab",
+        "166": "photo_engine_passenger_side",
+        "167": "photo_exterior_front",
+        "168": "photo_exterior_passenger_side",
+        "169": "photo_exterior_rear",
+    }
+    for src_key, target_col in website_photo_map.items():
+        if src_key in values:
+            raw = values.get(src_key)
+            if isinstance(raw, dict):
+                raw = raw.get("value")
+            if raw and str(raw).strip() not in ("", "None", "null") and not processed.get(target_col):
+                processed[target_col] = str(raw).strip()
 
     return processed
 
@@ -414,23 +454,37 @@ async def update_lead_info_in_quickbase(
             f"Quickbase lead info update failed: {resp.status_code} | {resp.text}"
         )
 
+# Quickbase Field IDs for photos:
+# File attachment fields: 38 (driver), 39 (engine driver), 40 (cab), 46 (engine pass), 47 (front), 48 (pass), 49 (rear)
+# Website URL fields: 163 (driver), 164 (engine driver), 165 (cab), 166 (engine pass), 167 (front), 168 (pass), 169 (rear)
+QB_PHOTO_FIELD_MAP = {
+    "photo_exterior_driver_side": {"file_id": 38, "web_id": 163},
+    "photo_engine_driver_side": {"file_id": 39, "web_id": 164},
+    "photo_cab": {"file_id": 40, "web_id": 165},
+    "photo_engine_passenger_side": {"file_id": 46, "web_id": 166},
+    "photo_exterior_front": {"file_id": 47, "web_id": 167},
+    "photo_exterior_passenger_side": {"file_id": 48, "web_id": 168},
+    "photo_exterior_rear": {"file_id": 49, "web_id": 169},
+}
+
 async def get_record_photo_status(record_id: int) -> dict:
     """
     Fetch the current values of photo fields from Quickbase for a specific record.
-    Returns a dict mapping column names to their Quickbase status (empty or not).
+    Checks both website URL fields (163-169) and file attachment fields (38-40, 46-49).
+    Returns a dict mapping column names to their Quickbase status (URL, filename, or None).
     """
-    from app.validators.image_validation import PHOTO_FIELD_MAP
-    
     url = f"https://api.quickbase.com/v1/records/query"
     
-    # Select record_id and all photo field IDs
-    select_ids = [str(QB_KEY_FIELD_ID)] + [str(v) for v in PHOTO_FIELD_MAP.values()]
-    
-    payload = {
-        "from": QB_TABLE_ID,
-        "select": select_ids,
-        "where": f"{{{QB_KEY_FIELD_ID}.EX.{record_id}}}"
-    }
+    select_ids = [QB_KEY_FIELD_ID]
+    for m in QB_PHOTO_FIELD_MAP.values():
+        select_ids.append(m["file_id"])
+        select_ids.append(m["web_id"])
+
+    tables_to_try = []
+    if QB_TABLE_ID:
+        tables_to_try.append(QB_TABLE_ID)
+    if "br5nbqyfg" not in tables_to_try:
+        tables_to_try.append("br5nbqyfg")
 
     headers = {
         "QB-Realm-Hostname": QB_REALM,
@@ -438,31 +492,56 @@ async def get_record_photo_status(record_id: int) -> dict:
         "Content-Type": "application/json",
     }
 
+    record_data = None
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+        for tbl in tables_to_try:
+            payload = {
+                "from": tbl,
+                "select": select_ids,
+                "where": f"{{{QB_KEY_FIELD_ID}.EX.{record_id}}}"
+            }
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code == 200:
+                    records = resp.json().get("data", [])
+                    if records:
+                        record_data = records[0]
+                        break
+            except Exception as e:
+                logging.error(f"Failed to fetch photo status from Quickbase table {tbl}: {e}")
 
-    if resp.status_code != 200:
-        logging.error(f"Failed to fetch photo status from Quickbase: {resp.text}")
+    if not record_data:
+        logging.warning(f"No photo data found in Quickbase for record_id={record_id}")
         return {}
 
-    data = resp.json().get("data", [])
-    if not data:
-        return {}
-
-    record_data = data[0]
     result = {}
-    
-    # Reverse map: Field ID (as string) -> column name
-    id_to_col = {str(v): k for k, v in PHOTO_FIELD_MAP.items()}
-    
-    for field_id_str, field_val in record_data.items():
-        if field_id_str in id_to_col:
-            col_name = id_to_col[field_id_str]
-            # In Quickbase API v1, file fields return a dict with fileName or null
-            val = field_val.get("value")
-            if val and isinstance(val, dict) and val.get("fileName"):
-                result[col_name] = val.get("fileName")
-            else:
-                result[col_name] = None
-            
+    for col_name, mapping in QB_PHOTO_FIELD_MAP.items():
+        file_val = record_data.get(str(mapping["file_id"]), {}).get("value")
+        web_val = record_data.get(str(mapping["web_id"]), {}).get("value")
+        
+        # 1. Prefer website URL if present
+        if web_val and isinstance(web_val, str) and web_val.strip():
+            result[col_name] = web_val.strip()
+        # 2. Or file attachment if present
+        elif file_val and isinstance(file_val, dict) and file_val.get("fileName"):
+            result[col_name] = file_val.get("fileName")
+        else:
+            result[col_name] = None
+
     return result
+
+async def fetch_and_sync_record_photos(conn, record_id: int) -> dict:
+    """
+    Fetch photo statuses/URLs from Quickbase (including 'from website' fields)
+    and update PostgreSQL DB so that local records have the photo URLs populated.
+    """
+    photos = await get_record_photo_status(int(record_id))
+    if photos and conn:
+        update_cols = {col: val for col, val in photos.items() if val}
+        if update_cols:
+            try:
+                await update_record(conn, table_name=DB_TABLE_NAME, where_key="record_id", record_id=int(record_id), values=update_cols)
+                logging.info(f"📸 [fetch_and_sync_record_photos] Synced {len(update_cols)} photo(s) from Quickbase into DB for record_id={record_id}: {list(update_cols.keys())}")
+            except Exception as e:
+                logging.error(f"❌ [fetch_and_sync_record_photos] DB update failed for record_id={record_id}: {e}")
+    return photos
