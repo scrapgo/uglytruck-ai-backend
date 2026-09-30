@@ -1,5 +1,6 @@
 import os
 import base64
+import logging
 import asyncio
 import time
 import httpx
@@ -22,6 +23,16 @@ gpt_vision_classifier = GPTVisionTruckViewClassifier()
 # Define a directory to store uploaded images
 UPLOAD_DIRECTORY = "app/database/uploaded_truck_images"
 os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
+
+# User-Agents tried, in order, when downloading images from external (non-Quickbase) URLs such as
+# the WordPress uploads on uglytruck.net. The site's firewall answers HTTP 403 to the Chrome/120
+# string that used to be hardcoded here, which made every website photo "missing". On a 403 we
+# retry with the next entry. An empty string means "send httpx's default User-Agent".
+EXTERNAL_URL_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "",
+]
 
 
 @router.post("/open_clip-test")
@@ -93,15 +104,18 @@ async def _fetch_image(
         permanent_errors = {400, 401, 403, 404, 405, 410, 422}
         transient_errors = {429, 500, 502, 503, 504}
 
+        # External (non-Quickbase) URLs, e.g. WordPress uploads on uglytruck.net, must not receive the
+        # Quickbase auth headers. They get a browser-like User-Agent instead, rotated on HTTP 403.
+        is_external_url = "quickbase.com" not in complete_url.lower() and complete_url.startswith("http")
+        ua_index = 0
+
         while True:
             attempt += 1
             elapsed_time = time.monotonic() - start_time
-            
-            # For external URLs (e.g. WordPress/uglytruck.net), don't pass Quickbase auth headers
-            if "quickbase.com" not in complete_url.lower() and complete_url.startswith("http"):
-                req_headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                }
+
+            if is_external_url:
+                user_agent = EXTERNAL_URL_USER_AGENTS[ua_index]
+                req_headers = {"User-Agent": user_agent} if user_agent else {}
             else:
                 req_headers = download_headers
 
@@ -112,7 +126,17 @@ async def _fetch_image(
                     print(f"Successfully fetched image after {elapsed_time:.1f}s (attempt {attempt})")
                 break
 
+            # Some hosts' firewalls block specific User-Agent strings with 403. Try the next one first.
+            if resp.status_code == 403 and is_external_url and ua_index < len(EXTERNAL_URL_USER_AGENTS) - 1:
+                logging.warning(
+                    f"[fetch_image] HTTP 403 for {complete_url} with User-Agent "
+                    f"'{EXTERNAL_URL_USER_AGENTS[ua_index] or 'httpx default'}'. Retrying with the next User-Agent."
+                )
+                ua_index += 1
+                continue
+
             if resp.status_code in permanent_errors:
+                logging.error(f"[fetch_image] Giving up on {complete_url}: HTTP {resp.status_code}")
                 error_message = f"HTTP {resp.status_code}"
                 try:
                     if "application/json" in resp.headers.get("content-type", ""):
