@@ -9,7 +9,8 @@ from app.quickbase.quickbase_fetch import fetch_tables, fetch_table_records_with
 from app.quickbase.quickbase_dump import insert_truck_sales_record, normalize_keys, normalize_value, normalize_quickbase_record
 from app.database.database import get_connection
 from app.database.queries import Queries
-from app.quickbase.webhook_operations import upsert_record, update_record, delete_record, preprocess_values
+from app.quickbase.webhook_operations import upsert_record, update_record, delete_record, preprocess_values, fetch_and_sync_record_photos
+from app.validators.image_validation import PHOTO_FIELD_MAP
 from app.routers.agent import webhook_data_validator, webhook_call_agent
 router = APIRouter()
 
@@ -110,6 +111,59 @@ async def dump_tables():
             return {"status":"success","message":"No new records found to dump."}
 
     return {"status": "success","message": "Records dumped successfully."}
+
+@router.post("/sync_photos/{record_id}")
+async def sync_photos_for_record(record_id: int):
+    """
+    Copy the photo URLs / filenames for one record from Quickbase into the local leads table
+    and return what the row holds afterwards. Use it to backfill a lead or to diagnose why its
+    photo_* columns are NULL.
+    """
+    photo_cols = list(PHOTO_FIELD_MAP.keys())
+    conn = await get_connection()
+    try:
+        row = await conn.fetchrow(f'SELECT id FROM "{DB_TABLE_NAME}" WHERE record_id = $1', record_id)
+        if not row:
+            raise HTTPException(status_code=404, detail=f"record_id {record_id} not found in {DB_TABLE_NAME}")
+        photos = await fetch_and_sync_record_photos(conn, record_id)
+        found_in_quickbase = {k: v for k, v in (photos or {}).items() if v}
+        after = await conn.fetchrow(
+            f'SELECT {", ".join(photo_cols)} FROM "{DB_TABLE_NAME}" WHERE record_id = $1', record_id
+        )
+        db_values = {c: after[c] for c in photo_cols} if after else {}
+        return {
+            "record_id": record_id,
+            "found_in_quickbase": found_in_quickbase,
+            "db_values_after_sync": db_values,
+            "message": "Photo columns updated" if found_in_quickbase else "No photo values found in Quickbase for this record",
+        }
+    finally:
+        await conn.close()
+
+
+@router.post("/sync_photos")
+async def sync_photos_for_missing(limit: int = 50):
+    """
+    Backfill photo columns from Quickbase for the newest rows whose photo_* columns are all empty.
+    """
+    photo_cols = list(PHOTO_FIELD_MAP.keys())
+    all_empty = " AND ".join(f'("{c}" IS NULL OR "{c}" = \'\')' for c in photo_cols)
+    conn = await get_connection()
+    try:
+        rows = await conn.fetch(
+            f'SELECT record_id FROM "{DB_TABLE_NAME}" WHERE record_id IS NOT NULL AND {all_empty} '
+            f'ORDER BY id DESC LIMIT $1',
+            limit,
+        )
+        results = {}
+        for r in rows:
+            rid = int(r["record_id"])
+            photos = await fetch_and_sync_record_photos(conn, rid)
+            results[rid] = sorted(k for k, v in (photos or {}).items() if v)
+        return {"checked": len(results), "updated": sum(1 for v in results.values() if v), "results": results}
+    finally:
+        await conn.close()
+
 
 @router.post("/fetch_and_dump")
 async def fetch_and_dump():

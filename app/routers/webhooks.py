@@ -237,7 +237,17 @@ async def webhook(request: Request):
             record_id=record_id,
             values=clean_values
         )
-        
+
+        # Website leads can be created in Quickbase before the "from website" URL fields are filled,
+        # and Replace payloads usually omit those fields. If the row still has no photos, sync them now.
+        row_has_photos = bool(old_record) and any(old_record.get(c) for c in PHOTO_FIELD_MAP)
+        payload_has_photos = any(clean_values.get(c) for c in PHOTO_FIELD_MAP)
+        if old_record and not row_has_photos and not payload_has_photos:
+            try:
+                await fetch_and_sync_record_photos(conn, int(record_id))
+            except Exception as e:
+                logging.warning(f"[EMAIL-FLOW][Replace] ⚠️ Photo sync from Quickbase failed for record_id={record_id}: {e}")
+
         logging.info(f"[EMAIL-FLOW][Replace] Incoming new values → status='{new_status}', email='{new_email}', phone='{new_phone}', transportation='{new_transportation_status}' for record_id={record_id}")
         
         if old_status != new_status or old_email != new_email or old_phone != new_phone or old_transportation_status != new_transportation_status:

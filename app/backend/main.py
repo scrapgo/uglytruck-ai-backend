@@ -49,9 +49,12 @@ app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(llm_router, prefix="/llm", tags=["LLM"])
 app.include_router(webhooks_router, prefix="/webhooks", tags=["Webhooks"])
 
+# Bump on each deploy. `GET /health` returns it, so you can confirm which code the server runs.
+APP_VERSION = "2026-10-01.3-photo-sync"
+
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 if __name__ == "__main__":
