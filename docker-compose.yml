@@ -1,6 +1,9 @@
 services:
   backend:
-    build: ./
+    build:
+      context: ./
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     container_name: uglytruck-backend
     ports:
       - "9160:9160"

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import uvicorn
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 load_dotenv()
 #from app.routers.twilio_routes import router as twilio_router
@@ -50,11 +51,24 @@ app.include_router(llm_router, prefix="/llm", tags=["LLM"])
 app.include_router(webhooks_router, prefix="/webhooks", tags=["Webhooks"])
 
 # Bump on each deploy. `GET /health` returns it, so you can confirm which code the server runs.
-APP_VERSION = "2026-10-01.3-photo-sync"
+APP_VERSION = "2026-10-01.4-photo-sync"
+STARTED_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def _git_commit() -> str:
+    """Short git hash of the running code, or 'unknown' (e.g. inside Docker where .git is excluded)."""
+    try:
+        import subprocess
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL, timeout=3
+        ).decode().strip() or "unknown"
+    except Exception:
+        return os.getenv("GIT_COMMIT", "unknown")
+
+GIT_COMMIT = _git_commit()
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "version": APP_VERSION}
+    return {"status": "ok", "version": APP_VERSION, "commit": GIT_COMMIT, "started_at": STARTED_AT}
 
 
 if __name__ == "__main__":
