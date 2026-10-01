@@ -230,6 +230,19 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
             if not skip_image_validation:
                 # ---- Delegate image validation to separate module ----
                 if not set_missing_truck_none:
+                    # Sync photo URLs from Quickbase into the DB row before validating. Website leads
+                    # usually arrive without the "from website" URL fields in the webhook payload, so
+                    # the local photo columns stayed NULL even though validation found the URLs in
+                    # Quickbase. This persists them and gives validate_images the same values.
+                    try:
+                        from app.quickbase.webhook_operations import fetch_and_sync_record_photos
+                        synced_photos = await fetch_and_sync_record_photos(conn, int(rec["record_id"]))
+                        for photo_col, photo_val in (synced_photos or {}).items():
+                            if photo_val and not rec.get(photo_col):
+                                rec[photo_col] = photo_val
+                    except Exception as sync_err:
+                        logging.warning(f"[EMAIL-FLOW][Validator] ⚠️ Photo sync from Quickbase failed for record_id={record_id}: {sync_err}")
+
                     logging.info(f"[EMAIL-FLOW][Validator] 📸 Running image validation for record_id={record_id}")
                     image_urls, missing_views = await validate_images(rec, GPT_VISION_URL)
                     logging.info(f"[EMAIL-FLOW][Validator] Image validation result for record_id={record_id}: found={len(image_urls) if image_urls else 0} image(s), missing_views={missing_views}")

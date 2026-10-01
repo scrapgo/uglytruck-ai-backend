@@ -43,6 +43,7 @@ from app.quickbase.webhook_operations import (
     upload_file_to_quickbase,
     FIELD_ID_SEQUENCE,  # kept for compatibility elsewhere
     update_lead_info_in_quickbase,
+    fetch_and_sync_record_photos,
 )
 from app.communication.conversation_repository import (
     fetch_current_status,
@@ -127,6 +128,7 @@ async def webhook(request: Request):
         # Check if photos are missing from webhook payload; if so, fetch directly from Quickbase (including website photo URLs)
         from app.validators.image_validation import PHOTO_FIELD_MAP
         has_any_photos = any(clean_values.get(k) for k in PHOTO_FIELD_MAP)
+        qb_photos_filled = False
         if not has_any_photos:
             from app.quickbase.webhook_operations import get_record_photo_status
             logging.info(f"[EMAIL-FLOW][Add] 🔍 No photos in webhook payload. Checking Quickbase photo and website fields for record_id={record_id}...")
@@ -136,6 +138,7 @@ async def webhook(request: Request):
                     for k, v in qb_photos.items():
                         if v and not clean_values.get(k):
                             clean_values[k] = v
+                    qb_photos_filled = any(v for v in qb_photos.values())
                     logging.info(f"[EMAIL-FLOW][Add] 📸 Retrieved photo values from Quickbase for record_id={record_id}: {[k for k, v in qb_photos.items() if v]}")
             except Exception as e:
                 logging.warning(f"[EMAIL-FLOW][Add] ⚠️ Could not fetch photos from Quickbase for record_id={record_id}: {e}")
@@ -143,6 +146,14 @@ async def webhook(request: Request):
         logging.info(f"[EMAIL-FLOW][Add] Preprocessed values for record_id={record_id}: status={clean_values.get('status')}, email={clean_values.get('seller_email')}, phone={clean_values.get('seller_phone')}")
         await upsert_record(conn, record_id, clean_values)
         logging.info(f"[EMAIL-FLOW][Add] DB upsert complete for record_id={record_id}")
+
+        # If the webhook payload carried photo keys (so the pre-insert Quickbase fetch was skipped)
+        # the row may still lack the website URL fields 163-169. Sync them from Quickbase now.
+        if not qb_photos_filled:
+            try:
+                await fetch_and_sync_record_photos(conn, int(record_id))
+            except Exception as e:
+                logging.warning(f"[EMAIL-FLOW][Add] ⚠️ Photo sync from Quickbase failed for record_id={record_id}: {e}")
 
         # Always reset communication state so previously-processed records
         # (status=3) are treated as fresh and the full email flow runs again.

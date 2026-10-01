@@ -19,12 +19,24 @@ def get_connection():
     )
 
 # Function to insert one record
+def _insert_columns() -> list:
+    """Column names of Queries.INSERT_RECORD_PSYCOP, in order."""
+    import re as _re
+    cols = _re.search(r"\((.*?)\)\s*VALUES", Queries.INSERT_RECORD_PSYCOP, _re.S).group(1)
+    return [c.strip() for c in cols.split(",") if c.strip()]
+
+
 def insert_truck_sales_record(record: dict):
     conn = get_connection()
     cursor = conn.cursor()
 
     insert_query = sql.SQL(Queries.INSERT_RECORD_PSYCOP.format(table_name=DB_TABLE_NAME))
-    values = tuple(record.values())
+    # Build the values in the INSERT's column order by name, instead of relying on dict order.
+    # Extra keys (e.g. a Quickbase label with no mapper entry) are ignored instead of shifting columns.
+    values = tuple(record.get(col) for col in _insert_columns())
+    unknown = [k for k in record if k not in _insert_columns()]
+    if unknown:
+        print(f"ℹ️ Ignoring keys with no DB column: {unknown}")
     try:
         cursor.execute(insert_query, values)
         conn.commit()
@@ -108,7 +120,12 @@ def normalize_keys(record: dict, mapper: dict) -> dict:
     for k, v in record.items():
         k_clean = k.strip().replace("’", "'").replace("‘", "'")
         new_key = mapper.get(k_clean, k_clean)  # use mapping if exists
-        normalized[new_key] = normalize_value(new_key, v)
+        new_val = normalize_value(new_key, v)
+        # Two Quickbase labels map onto the same column (e.g. "Photo Exterior Front" and
+        # "Photo Exterior Front from website"). Keep the non-empty one.
+        if new_key in normalized and normalized[new_key] not in (None, "") and new_val in (None, ""):
+            continue
+        normalized[new_key] = new_val
     return normalized
 
 import re

@@ -44,7 +44,9 @@ def fetch_table_records_with_labels(table_id: str, top: int = 0, last_sync_date:
     # Build Quickbase query payload
     payload = {
         "from": table_id,
-        "select": [3, 1, 2, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 41, 25, 26, 27, 28, 29, 30, 31, 32, 33, 24, 38, 39, 40, 46, 47, 48, 49, 53, 52, 51, 45, 64, 67, 77, 50, 106, 130, 137, 138, 139, 140, 146, 147, 148, 149, 158]
+        "select": [3, 1, 2, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 41, 25, 26, 27, 28, 29, 30, 31, 32, 33, 24, 38, 39, 40, 46, 47, 48, 49, 53, 52, 51, 45, 64, 67, 77, 50, 106, 130, 137, 138, 139, 140, 146, 147, 148, 149, 158,
+                   # "Photo ... from website" URL fields (Gravity Forms uploads); mapper.json maps them onto the photo_* columns
+                   163, 164, 165, 166, 167, 168, 169]
 ,  # empty = all fields
         "options": {"skip": 0},
         "sortBy": [{"fieldId": 3, "order": "DESC"}]
