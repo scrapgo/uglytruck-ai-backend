@@ -467,6 +467,56 @@ QB_PHOTO_FIELD_MAP = {
     "photo_exterior_rear": {"file_id": 49, "web_id": 169},
 }
 
+GF_UPLOAD_URL_MARKER = "/wp-content/uploads/gravity_forms/"
+
+
+async def get_record_website_photo_urls_anywhere(record_id: int) -> list:
+    """
+    Return every Gravity Forms upload URL stored in ANY field of the Quickbase record.
+
+    The WordPress -> Quickbase feed is known to shift the photo URLs by one slot and drop one
+    (the "from website" fields 163-169 end up holding each other's photos and one photo lands
+    elsewhere or nowhere). The backend labels photos by content, so validating every website
+    upload URL on the record, wherever it was stored, recovers a misplaced photo.
+    """
+    import re as _re
+    tbl = QB_TABLE_ID or "br5nbqyfg"
+    headers = {
+        "QB-Realm-Hostname": QB_REALM,
+        "Authorization": f"QB-USER-TOKEN {QB_USER_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            meta = await client.get(f"https://api.quickbase.com/v1/fields?tableId={tbl}", headers=headers)
+            if meta.status_code != 200:
+                logging.warning(f"[website_photo_urls] Could not list Quickbase fields ({meta.status_code}) for table {tbl}")
+                return []
+            field_ids = [f["id"] for f in meta.json() if f.get("fieldType") != "file"]
+            resp = await client.post(
+                "https://api.quickbase.com/v1/records/query",
+                headers=headers,
+                json={"from": tbl, "select": field_ids, "where": f"{{{QB_KEY_FIELD_ID}.EX.{record_id}}}"},
+            )
+            if resp.status_code != 200:
+                logging.warning(f"[website_photo_urls] Quickbase query failed ({resp.status_code}) for record_id={record_id}")
+                return []
+            data = resp.json().get("data", [])
+            if not data:
+                return []
+            urls = []
+            for cell in data[0].values():
+                value = cell.get("value") if isinstance(cell, dict) else cell
+                if isinstance(value, str) and GF_UPLOAD_URL_MARKER in value:
+                    for found in _re.findall(r"https?://[^\s\"'<>]+", value):
+                        if GF_UPLOAD_URL_MARKER in found:
+                            urls.append(found.strip().rstrip(".,;)"))
+            return list(dict.fromkeys(urls))
+    except Exception as e:
+        logging.warning(f"[website_photo_urls] Failed for record_id={record_id}: {e}")
+        return []
+
+
 async def get_record_photo_status(record_id: int) -> dict:
     """
     Fetch the current values of photo fields from Quickbase for a specific record.

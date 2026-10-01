@@ -92,6 +92,24 @@ async def validate_images(rec: dict, gpt_vision_url: str):
             image_urls.append(url)
             views_with_urls[PHOTO_VIEW_LABELS[key]] = url
 
+    # 2b️⃣ The WordPress -> Quickbase feed shifts website photos by one slot and drops one, so the
+    # seven "from website" fields rarely hold all seven uploads. Validate every Gravity Forms upload
+    # URL stored anywhere on the record so a misplaced photo still counts.
+    website_urls = [u for u in image_urls if u.startswith("http")]
+    if record_id and website_urls and len(website_urls) < len(PHOTO_FIELD_MAP):
+        try:
+            from app.quickbase.webhook_operations import get_record_website_photo_urls_anywhere
+            extras = [u for u in await get_record_website_photo_urls_anywhere(int(record_id)) if u not in image_urls]
+            if extras:
+                image_urls.extend(extras)
+            logging.warning(
+                f"[validate_images] ⚠️ record_id={record_id}: Quickbase holds {len(website_urls)} of "
+                f"{len(PHOTO_FIELD_MAP)} website photo URLs in the 'from website' fields; "
+                f"{len(extras)} more found in other fields. Check the WordPress → Quickbase photo field mapping."
+            )
+        except Exception as e:
+            logging.warning(f"[validate_images] ⚠️ Could not scan Quickbase for misplaced website photos (record_id={record_id}): {e}")
+
     logging.info(f"[validate_images] 📸 Extracted {len(image_urls)} image URL(s) for record_id={record_id}: {image_urls}")
 
     # Case 1: No images at all
