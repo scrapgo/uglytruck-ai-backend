@@ -229,8 +229,7 @@ CRITICAL RULES:
 - If truck photo(s) were just received and FULFILLING ALL the truck views, turn truck_view_pics_received_confirmation to 1.
 - If document(s) were received, analyze the filenames to determine if ALL THREE required documents (DL, Title, Banking) are present
 - If document(s) were received, turn docs_received_confirmation to 1.
-- To suggest "Complete": Current status must be "Need Pics" AND all three required documents (DL, Title, Banking) must be present based on filenames
-- If documents are missing, suggest "Need Pics" (seller still needs to provide missing documents)
+- To suggest "Complete": Current status must be "Need Pics" or "New Lead" AND all seven truck views are present. Documents (DL, Title, Banking) are NOT required for "Complete"; they belong to the stage after an offer is accepted.
 - If no attachments were received, you may suggest "Need Pics" if photos or documents are still needed
 - Choose only ONE status
 - If unsure, choose the EARLIEST valid status

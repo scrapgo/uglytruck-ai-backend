@@ -404,6 +404,23 @@ async def fetch_current_status(record_id: int) -> str | None:
     row = await conn.fetchrow(query, record_id)
     return row["status"] if row else None
 
+async def fetch_latest_outbound_bodies(record_id: int, limit: int = 10) -> list:
+    """Bodies of the most recent emails WE sent for this record, newest first."""
+    query = """
+        SELECT body
+        FROM email_conversations
+        WHERE record_id = $1 AND direction = 'outbound'
+        ORDER BY created_at DESC
+        LIMIT $2
+    """
+    conn = await get_connection()
+    try:
+        rows = await conn.fetch(query, record_id, limit)
+    finally:
+        await conn.close()
+    return [row["body"] or "" for row in rows]
+
+
 async def update_lead_status_pg(record_id: int, new_status: str):
     query = f"""
         UPDATE public.{DB_TABLE_NAME}
@@ -418,17 +435,33 @@ async def update_lead_status_pg(record_id: int, new_status: str):
         WHERE record_id = $2
     """
     conn = await get_connection()
-    await conn.execute(query, new_status, record_id)
+    try:
+        await conn.execute(query, new_status, record_id)
+    finally:
+        await conn.close()
 
-    # Send alert to Dale when Complete
     if new_status == "Complete":
-        await send_alert_to_dale(
-            record_id=record_id,
-            alert_type="complete",
-            message=f"BOS is required for next steps."
-        )
-        # Also update Quickbase status, but don't send duplicate alert
-        await update_quickbase_status(record_id, new_status, send_alert=False)
+        # Postgres first (above), then Quickbase, then the alert. Quickbase's Replace webhook sees
+        # the same status in Postgres and does nothing, and a failing alert can no longer block
+        # the Quickbase update.
+        qb_ok = True
+        try:
+            await update_quickbase_status(record_id, new_status, send_alert=False)
+        except Exception as e:
+            qb_ok = False
+            logging.exception(f"Quickbase status update to 'Complete' failed for record_id={record_id}: {e}")
+
+        message = "BOS is required for next steps."
+        if not qb_ok:
+            message += " NOTE: the automatic Quickbase status update failed; please set the status to Complete manually."
+        try:
+            await send_alert_to_dale(
+                record_id=record_id,
+                alert_type="complete",
+                message=message
+            )
+        except Exception as e:
+            logging.exception(f"'Lead Complete' alert to Dale failed for record_id={record_id}: {e}")
 
 async def update_quickbase_status(record_id: int, status: str, send_alert: bool = True):
     """

@@ -216,8 +216,12 @@ async def webhook_data_validator(record_id: int, set_missing_truck_none: bool=Fa
                     await conn.fetchrow(
                         update_lead_information_received_status, 1, rec["id"]
                     )
-                    # Update Quickbase status to "Need Pics" when lead info is complete
+                    # Update Quickbase status to "Need Pics" when lead info is complete.
+                    # Mark it as ours first: Quickbase answers with a Replace webhook, and the
+                    # webhook handler must not treat that as a new change and email the seller again.
                     from app.communication.conversation_repository import update_quickbase_status
+                    from app.utils.self_updates import mark_self_status_update
+                    mark_self_status_update(rec["record_id"], "Need Pics")
                     await update_quickbase_status(rec["record_id"], "Need Pics")
                     logging.info(
                         f"[EMAIL-FLOW][Validator] ✅ record_id={record_id}: All required lead info present → "

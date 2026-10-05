@@ -261,20 +261,30 @@ async def webhook(request: Request):
                 logging.info(f"[EMAIL-FLOW][Replace] 🔄 Transportation changed: '{old_transportation_status}' → '{new_transportation_status}' for record_id={record_id}")
             logging.info(f"[EMAIL-FLOW][Replace] ▶ Change detected — routing to email handler for record_id={record_id}, new_status='{new_status}'")
             if new_status in ['New Lead', 'Need Pics']:
-                logging.info(f"[EMAIL-FLOW][Replace] 📋 Status='{new_status}' → calling webhook_data_validator for record_id={record_id}")
-                validator_result = await webhook_data_validator(record_id)
-                missing_views = validator_result.get("missing_views", []) if validator_result else []
-                logging.info(f"[EMAIL-FLOW][Replace] Validator returned missing_views={missing_views} for record_id={record_id}")
-                logging.info(f"[EMAIL-FLOW][Replace] 📧 Calling webhook_call_agent for record_id={record_id} with missing_views={missing_views}")
-                await webhook_call_agent(record_id, missing_views=missing_views)
-                logging.info(f"[EMAIL-FLOW][Replace] ✅ webhook_call_agent completed for record_id={record_id}")
+                from app.utils.self_updates import consume_self_status_update
+                if old_status != new_status and consume_self_status_update(record_id, new_status):
+                    # This backend set the status itself (lead info complete → Need Pics) while the
+                    # Add flow was already validating photos and emailing the seller. Re-running
+                    # the validator here used to send the seller the same reminder a second time.
+                    logging.info(f"[EMAIL-FLOW][Replace] ⏭️  Status '{old_status}' → '{new_status}' was set by this backend; validator/email already ran in the Add flow. Skipping duplicate run for record_id={record_id}")
+                else:
+                    logging.info(f"[EMAIL-FLOW][Replace] 📋 Status='{new_status}' → calling webhook_data_validator for record_id={record_id}")
+                    validator_result = await webhook_data_validator(record_id)
+                    missing_views = validator_result.get("missing_views", []) if validator_result else []
+                    logging.info(f"[EMAIL-FLOW][Replace] Validator returned missing_views={missing_views} for record_id={record_id}")
+                    logging.info(f"[EMAIL-FLOW][Replace] 📧 Calling webhook_call_agent for record_id={record_id} with missing_views={missing_views}")
+                    await webhook_call_agent(record_id, missing_views=missing_views)
+                    logging.info(f"[EMAIL-FLOW][Replace] ✅ webhook_call_agent completed for record_id={record_id}")
 
             elif new_status == 'Complete':
-                logging.info(f"[EMAIL-FLOW][Replace] 🏁 Status='Complete' → running validator (bypass GPT) then sending seller email for record_id={record_id}")
-                await webhook_data_validator(record_id, set_missing_truck_none=True)
-                logging.info(f"[EMAIL-FLOW][Replace] Validator done (Complete path) for record_id={record_id}. Calling webhook_call_agent.")
-                await webhook_call_agent(record_id, set_missing_truck_none=True)
-                logging.info(f"[EMAIL-FLOW][Replace] ✅ Complete email flow finished for record_id={record_id}")
+                if old_status == 'Complete':
+                    logging.info(f"[EMAIL-FLOW][Replace] ⏭️  Already 'Complete' in DB for record_id={record_id}; not re-running the completion flow")
+                else:
+                    logging.info(f"[EMAIL-FLOW][Replace] 🏁 Status='Complete' → running validator (bypass GPT) then sending seller email for record_id={record_id}")
+                    await webhook_data_validator(record_id, set_missing_truck_none=True)
+                    logging.info(f"[EMAIL-FLOW][Replace] Validator done (Complete path) for record_id={record_id}. Calling webhook_call_agent.")
+                    await webhook_call_agent(record_id, set_missing_truck_none=True)
+                    logging.info(f"[EMAIL-FLOW][Replace] ✅ Complete email flow finished for record_id={record_id}")
             
             elif new_status == 'Offer Made':
                 logging.info(f"[EMAIL-FLOW][Replace] 💰 Status='Offer Made' → sending offer email to seller for record_id={record_id}")
@@ -544,86 +554,95 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
                 where_key="record_id"
             )
             await conn.fetchrow(update_docs_received_status, 1, record_id)
-        # 2) Upload truck photo attachments to Quickbase, filling ONLY empty photo fields
-        # We upload all files first, then trigger validation ONCE after all uploads complete
-
-        # 2) Smart image classification and upload
-        from app.utils.smart_image_classifier import SmartImageClassifier
+        # 2) Which views did our reminder ask for, and which of the replied photos answer it?
+        #    Only photos matching a requested view are uploaded; each one REPLACES the old photo
+        #    for that view. Other attached photos are left alone.
+        from app.quickbase.webhook_operations import get_record_photo_values, photo_file_url
+        from app.utils.photo_decision import (
+            parse_requested_views,
+            select_uploads,
+            remaining_requested_views,
+            LABEL_TO_COLUMN,
+        )
+        from app.communication.conversation_repository import fetch_latest_outbound_bodies
 
         uploaded_any = False
         uploaded_count = 0
+        classified_count = 0
         uploaded_attachment_names = []
+        uploaded_views = []
+        failed_views = []
         classification_results = []
+        current_missing_views = None
 
-        # Determine which QuickBase photo fields are currently empty
-        # SYNC: Fetch latest photo status from Quickbase to be absolutely sure
-        from app.quickbase.webhook_operations import get_record_photo_status
-        qb_photo_status = {}
+        # 2a) Read the reminder: first the stored copy of the email we sent, then the reminder
+        #     quoted inside the seller's reply.
+        requested_views = None
+        requested_source = None
+        try:
+            for outbound_body in await fetch_latest_outbound_bodies(int(record_id), limit=10):
+                parsed = parse_requested_views(outbound_body)
+                if parsed:
+                    requested_views, requested_source = parsed, "stored outbound email"
+                    break
+        except Exception as e:
+            logging.warning(f"[SENDGRID TASK] ⚠️ Could not read outbound emails for record_id={record_id}: {e}")
+        if requested_views is None:
+            parsed = parse_requested_views(text_body or "")
+            if parsed:
+                requested_views, requested_source = parsed, "reminder quoted in the reply"
+        logging.info(
+            f"[SENDGRID TASK] 📬 record_id={record_id}: reminder asked for {requested_views} "
+            f"(source: {requested_source or 'none found'})"
+        )
+
+        # 2b) Current Quickbase photo state (file AND website URL per view); mirror into the DB row.
+        qb_photo_values = {}
         try:
             logging.info(f"🔄 Syncing photo status from Quickbase for record_id={record_id}")
-            qb_photo_status = await get_record_photo_status(int(record_id))
-            if qb_photo_status:
-                logging.info(f"✅ Sync successful. QB Photo Status: {qb_photo_status}")
-                # Update local DB with synced info
-                for col, val in qb_photo_status.items():
-                    if val:
-                        await conn.fetchrow(
-                            Queries.UPDATE_RECORD.format(table_name=DB_TABLE_NAME, set_clause=f'"{col}"', where_key="record_id"),
-                            val, int(record_id)
-                        )
-        except Exception as sync_err:
-            logging.error(f"⚠️ Quickbase photo sync failed: {sync_err}")
-
-        empty_field_ids = []
-        try:
-            photo_columns = list(PHOTO_FIELD_MAP.keys())
-            photo_row = await conn.fetchrow(
-                f"SELECT status, {', '.join(photo_columns)} FROM {DB_TABLE_NAME} WHERE record_id = $1",
-                record_id,
-            )
-            current_db_status = photo_row.get("status") if photo_row else None
-            
-            # Trust Quickbase status if sync worked, otherwise use DB row
-            for col, field_id in PHOTO_FIELD_MAP.items():
-                if qb_photo_status:
-                    # If field is not in qb_photo_status or value is None, it's empty
-                    if not qb_photo_status.get(col):
-                        empty_field_ids.append(field_id)
-                else:
-                    # Fallback to local DB if sync failed
-                    val = photo_row.get(col) if photo_row else None
-                    if val in (None, "", "null"):
-                        empty_field_ids.append(field_id)
-        except Exception as e:
-            logging.exception(f"⚠️ Failed to determine empty photo fields: {e}")
-            empty_field_ids = list(PHOTO_FIELD_MAP.values())
-
-        logging.info(f"📋 Empty field IDs for record_id={record_id}: {empty_field_ids}")
-
-        # NEW: Use smart classifier to map images to correct fields
-        # Initialize variable to capture missing views for the system note
-        current_missing_views = None
-        if truck_attachments:
-            classifier = SmartImageClassifier()
-            classification_results = await classifier.classify_and_map_images(
-                truck_attachments,
-                empty_field_ids
-            )
-
-            # Upload images to their correctly identified fields
-            for result in classification_results:
-                if not result["should_upload"]:
-                    print(f"⏭️  Skipping {result['attachment'].get('filename')}: {result['reason']}")
-                    logging.info(
-                        f"⏭️  Skipping {result['attachment'].get('filename')}: {result['reason']}"
+            qb_photo_values = await get_record_photo_values(int(record_id))
+            for col, vals in qb_photo_values.items():
+                current_val = vals.get("file_url") or vals.get("web")
+                if current_val:
+                    await conn.fetchrow(
+                        Queries.UPDATE_RECORD.format(table_name=DB_TABLE_NAME, set_clause=f'"{col}"', where_key="record_id"),
+                        current_val, int(record_id)
                     )
+            logging.info(f"✅ Quickbase photo state for record_id={record_id}: "
+                         f"{ {c: ('file' if v.get('file') else 'web' if v.get('web') else None) for c, v in qb_photo_values.items()} }")
+        except Exception as sync_err:
+            logging.error(f"⚠️ Quickbase photo sync failed for record_id={record_id}: {sync_err}")
+
+        current_db_status = None
+        try:
+            status_row = await conn.fetchrow(f"SELECT status FROM {DB_TABLE_NAME} WHERE record_id = $1", int(record_id))
+            current_db_status = status_row.get("status") if status_row else None
+        except Exception as e:
+            logging.exception(f"⚠️ Failed to read status for record_id={record_id}: {e}")
+
+        if truck_attachments:
+            # 2c) Label every replied photo. All field ids are passed so the classifier does no slot
+            #     filtering of its own; the selection below decides what gets uploaded.
+            classifier = SmartImageClassifier()
+            raw_results = await classifier.classify_and_map_images(
+                truck_attachments,
+                list(PHOTO_FIELD_MAP.values()),
+            )
+            classified_count = sum(1 for r in raw_results if r.get("label"))
+            existing_files = {col for col, vals in qb_photo_values.items() if vals.get("file")}
+            classification_results = select_uploads(raw_results, requested_views, existing_files)
+
+            # 2d) Upload the selected photos, replacing the old photo of that view
+            for result in classification_results:
+                attachment = result["attachment"]
+                filename = attachment.get("filename") or f"classified_{result.get('label')}.jpg"
+                if not result["should_upload"]:
+                    print(f"⏭️  Skipping {filename}: {result['reason']}")
+                    logging.info(f"⏭️  Skipping {filename} (label={result.get('label')}): {result['reason']}")
                     continue
 
-                attachment = result["attachment"]
                 field_id = result["field_id"]
                 label = result["label"]
-                filename = attachment.get("filename", f"classified_{label}.jpg")
-
                 try:
                     await upload_file_to_quickbase(
                         record_id=int(record_id),
@@ -632,38 +651,45 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
                         content=attachment["content"],
                         content_type=attachment["content_type"],
                     )
-                    
-                    # NEW: Update local Postgres database so subsequent validation sees the file
-                    db_col = next((k for k, v in PHOTO_FIELD_MAP.items() if v == field_id), None)
-                    if db_col:
-                        try:
-                            update_db_query = Queries.UPDATE_RECORD.format(
-                                table_name=DB_TABLE_NAME,
-                                set_clause=f'"{db_col}"',
-                                where_key="record_id"
-                            )
-                            # We just use the filename to indicate it's not empty/null
-                            await conn.fetchrow(update_db_query, filename, int(record_id))
-                            logging.info(f"💾 Updated local DB column '{db_col}' for record_id={record_id}")
-                        except Exception as db_err:
-                            logging.warning(f"⚠️ Failed to update local DB for column {db_col}: {db_err}")
 
-                    if current_db_status in ("Need Pics", "New Lead"):
-                        uploaded_any = True
+                    # Point the DB row at the new file so every later validation uses the
+                    # replacement instead of the old website URL / file.
+                    new_url = None
+                    try:
+                        refreshed = await get_record_photo_values(int(record_id))
+                        new_url = (refreshed.get(LABEL_TO_COLUMN[label]) or {}).get("file_url")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Could not re-read Quickbase after upload for record_id={record_id}: {e}")
+                    if not new_url:
+                        new_url = photo_file_url(int(record_id), field_id, 1)
+                    db_col = LABEL_TO_COLUMN[label]
+                    try:
+                        await conn.fetchrow(
+                            Queries.UPDATE_RECORD.format(table_name=DB_TABLE_NAME, set_clause=f'"{db_col}"', where_key="record_id"),
+                            new_url, int(record_id)
+                        )
+                        logging.info(f"💾 DB column '{db_col}' for record_id={record_id} now points to {new_url}")
+                    except Exception as db_err:
+                        logging.warning(f"⚠️ Failed to update local DB for column {db_col}: {db_err}")
+
+                    result["uploaded"] = True
+                    uploaded_views.append(label)
                     uploaded_count += 1
                     uploaded_attachment_names.append(filename)
-                    print(f"✅ Uploaded {filename} (classified as '{label}') \n",
-                        f"to field_id={field_id} for record_id={record_id}")
+                    if current_db_status in ("Need Pics", "New Lead"):
+                        uploaded_any = True
+                    print(f"✅ Uploaded {filename} as '{label}' to field_id={field_id} for record_id={record_id}")
                     logging.info(
-                        f"✅ Uploaded {filename} (classified as '{label}') "
-                        f"to field_id={field_id} for record_id={record_id}"
+                        f"✅ Uploaded {filename} as '{label}' ({result.get('basis')}) "
+                        f"to field_id={field_id} for record_id={record_id}, replacing the previous photo"
                     )
                 except Exception as e:
-                    logging.exception(
-                        f"❌ Failed to upload {filename} to field_id={field_id}: {e}"
-                    )
+                    result["uploaded"] = False
+                    result["reason"] = f"Upload failed: {e}"
+                    failed_views.append(label)
+                    logging.exception(f"❌ Failed to upload {filename} to field_id={field_id}: {e}")
 
-        # NEW: Save truck photos to local storage for accumulation
+        # Save truck photos to local storage for accumulation
         if truck_attachments:
             try:
                 storage_base = os.path.join(os.path.dirname(os.path.dirname(__file__)), "storage", "images", str(record_id))
@@ -681,126 +707,103 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
             except Exception as e:
                 logging.exception(f"⚠️ Failed to save photos to local storage for record_id={record_id}: {e}")
 
-        # 3) Post-upload validation - check if all required views are now present
-        # We run this if ANY truck photos were received, even if they weren't uploaded 
-        # (e.g. if they already existed, or if the seller is just re-sending confirmation).
+        # 3) Decide what is still missing and continue the flow (follow-up or Complete)
         if truck_attachments:
-            print(f"🔍 Running post-upload validation for record_id={record_id}")
-            logging.info(f"[SENDGRID TASK] 🔍 Running post-upload validation for record_id={record_id} with {len(truck_attachments)} attachments")
-
+            logging.info(f"[SENDGRID TASK] 🔍 Post-upload decision for record_id={record_id} with {len(truck_attachments)} attachment(s)")
             try:
-                # Import validation function
-                from app.validators.image_validation import validate_images
-                from app.routers.agent import GPT_VISION_URL
-
-                # Fetch updated record from DB
-                updated_record = await conn.fetchrow(
-                    f"SELECT * FROM {DB_TABLE_NAME} WHERE record_id = $1",
-                    record_id
-                )
-
-                if updated_record:
-                    # Convert asyncpg.Record to dict
-                    rec_dict = dict(updated_record)
-
-                    # Validate images to identify any remaining missing views
-                    image_urls, missing_views = await validate_images(rec_dict, GPT_VISION_URL)
-                    # [NEW] Capture for system note
-                    current_missing_views = missing_views
-                    print(f"📊 Post-upload validation results for record_id={record_id}: ",
-                        f"Found {len(image_urls)} images, Missing views: {missing_views}")
+                if requested_views is not None:
+                    # The reminder listed every view that was missing. Whatever it asked for and
+                    # this reply covered is now present (the photo was uploaded as that view);
+                    # the rest is still missing. No re-classification of the old photos.
+                    effective_missing = remaining_requested_views(requested_views, uploaded_views)
                     logging.info(
-                        f"📊 Post-upload validation results for record_id={record_id}: "
-                        f"Found {len(image_urls)} images, Missing views: {missing_views}"
+                        f"📊 record_id={record_id}: reminder asked for {requested_views}, "
+                        f"this reply covered {uploaded_views}, still missing {effective_missing}"
+                    )
+                else:
+                    # No reminder found: validate the whole record by content, counting the views
+                    # the seller just sent as present even if they were not uploaded.
+                    from app.validators.image_validation import validate_images
+                    from app.routers.agent import GPT_VISION_URL
+                    updated_record = await conn.fetchrow(
+                        f"SELECT * FROM {DB_TABLE_NAME} WHERE record_id = $1", int(record_id)
+                    )
+                    rec_dict = dict(updated_record) if updated_record else {"record_id": int(record_id)}
+                    image_urls, missing_views = await validate_images(rec_dict, GPT_VISION_URL)
+                    received_labels = {r.get("label") for r in classification_results if r.get("label")} - set(failed_views)
+                    effective_missing = [v for v in (missing_views or []) if v not in received_labels]
+                    logging.info(
+                        f"📊 record_id={record_id}: no reminder found; content validation of {len(image_urls)} image(s) "
+                        f"says missing {missing_views}, this reply contained {sorted(received_labels)}, "
+                        f"still missing {effective_missing}"
+                    )
+                current_missing_views = effective_missing
+
+                if effective_missing and current_db_status in ['New Lead', 'Need Pics']:
+                    print(f"📧 Triggering follow-up email for record_id={record_id} ",
+                        f"with missing views: {effective_missing}")
+                    logging.info(
+                        f"📧 Triggering follow-up email for record_id={record_id} "
+                        f"with missing views: {effective_missing}"
                     )
 
-                    # If there are still missing views, trigger follow-up email
-                    # ONLY if the status is 'New Lead' or 'Need Pics'. 
-                    # For 'Offer Made', we skip this to allow intent analysis to handle acceptance/decline.
-                    if missing_views and current_db_status in ['New Lead', 'Need Pics']:
-                        print(f"📧 Triggering follow-up email for record_id={record_id} ",
-                            f"with missing views: {missing_views}")
-                        logging.info(
-                            f"📧 Triggering follow-up email for record_id={record_id} "
-                            f"with missing views: {missing_views}"
-                        )
+                    # Update communication_subject to request missing views
+                    update_comm_subject = Queries.UPDATE_RECORD.format(
+                        table_name=DB_TABLE_NAME,
+                        set_clause="communication_subject",
+                        where_key="record_id"
+                    )
+                    await conn.fetchrow(update_comm_subject, "missing_truck", int(record_id))
 
-                        # Update communication_subject to request missing views
-                        update_comm_subject = Queries.UPDATE_RECORD.format(
-                            table_name=DB_TABLE_NAME,
-                            set_clause="communication_subject",
-                            where_key="record_id"
-                        )
-                        await conn.fetchrow(update_comm_subject, "missing_truck", int(record_id))
+                    # Set communication_status to 1 (email required)
+                    update_comm_status = Queries.UPDATE_RECORD.format(
+                        table_name=DB_TABLE_NAME,
+                        set_clause="communication_status",
+                        where_key="record_id"
+                    )
+                    await conn.fetchrow(update_comm_status, 1, int(record_id))
 
-                        # Set communication_status to 1 (email required)
-                        update_comm_status = Queries.UPDATE_RECORD.format(
-                            table_name=DB_TABLE_NAME,
-                            set_clause="communication_status",
-                            where_key="record_id"
-                        )
-                        await conn.fetchrow(update_comm_status, 1, int(record_id))
+                    # Trigger the agent to send the email
+                    from app.routers.agent import webhook_call_agent
+                    await webhook_call_agent(
+                        record_id=int(record_id),
+                        missing_views=effective_missing
+                    )
+                elif not effective_missing and current_db_status in ['New Lead', 'Need Pics']:
+                    print(f"✅ All required views confirmed for record_id={record_id}. "
+                        f"Transitioning to 'Complete'.")
+                    logging.info(f"✅ All required views confirmed for record_id={record_id}. Transitioning to 'Complete'.")
 
-                        # Trigger the agent to send the email
-                        from app.routers.agent import webhook_call_agent
-                        await webhook_call_agent(
-                            record_id=int(record_id),
-                            missing_views=missing_views
-                        )
-                    elif not missing_views and current_db_status in ['New Lead', 'Need Pics']:
-                        print(f"✅ All required views confirmed for record_id={record_id}. "
-                            f"Transitioning to 'Complete'.")
-                        
-                        from app.communication.conversation_repository import update_lead_status_pg
-                        await update_lead_status_pg(int(record_id), "Complete")
+                    await update_lead_status_pg(int(record_id), "Complete")
 
-                        # Sync flags
-                        update_status_sub = Queries.UPDATE_RECORD.format(
-                            table_name=DB_TABLE_NAME,
-                            set_clause="communication_subject",
-                            where_key="record_id"
-                        )
-                        await conn.fetchrow(update_status_sub, "complete_status", int(record_id))
-                        
-                        update_pics_received_status = Queries.UPDATE_RECORD.format(
-                                    table_name=DB_TABLE_NAME,
-                                    set_clause="truck_view_pics_received_confirmation",
-                                    where_key="record_id"
-                                )
-                        await conn.fetchrow(update_pics_received_status, 1, record_id)
+                    # Sync flags
+                    update_status_sub = Queries.UPDATE_RECORD.format(
+                        table_name=DB_TABLE_NAME,
+                        set_clause="communication_subject",
+                        where_key="record_id"
+                    )
+                    await conn.fetchrow(update_status_sub, "complete_status", int(record_id))
 
-                        # Trigger completion workflow email
-                        from app.routers.agent import webhook_call_agent
-                        await webhook_call_agent(
-                            record_id=int(record_id),
-                            set_missing_truck_none=True
-                        )
-                    else:
-                        logging.info(f"⏭️ Skipping proactive follow-up/completion for record_id={record_id} because status is '{current_db_status}'")
-                    
-                    # FINAL SYNC: Trust the database above all. 
-                    # Ensure current_missing_views doesn't include what we JUST uploaded or what is already in DB
-                    if current_missing_views:
-                        from app.validators.image_validation import PHOTO_VIEW_LABELS
-                        
-                        # Re-fetch latest record state from DB
-                        latest_row = await conn.fetchrow(f"SELECT * FROM {DB_TABLE_NAME} WHERE record_id = $1", int(record_id))
-                        populated_views = []
-                        if latest_row:
-                            for col, label in PHOTO_VIEW_LABELS.items():
-                                if latest_row.get(col) not in (None, "", "null"):
-                                    populated_views.append(label)
-                        
-                        successful_uploads = [res['label'] for res in classification_results if res.get('should_upload')]
-                        
-                        filtered_missing = [v for v in current_missing_views if v not in populated_views and v not in successful_uploads]
-                        current_missing_views = filtered_missing
-                        logging.info(f"🎯 Final synced missing views for record_id={record_id}: {current_missing_views}")
+                    update_pics_received_status = Queries.UPDATE_RECORD.format(
+                                table_name=DB_TABLE_NAME,
+                                set_clause="truck_view_pics_received_confirmation",
+                                where_key="record_id"
+                            )
+                    await conn.fetchrow(update_pics_received_status, 1, int(record_id))
+
+                    # Trigger completion workflow email
+                    from app.routers.agent import webhook_call_agent
+                    await webhook_call_agent(
+                        record_id=int(record_id),
+                        set_missing_truck_none=True
+                    )
+                else:
+                    logging.info(f"⏭️ Skipping proactive follow-up/completion for record_id={record_id} because status is '{current_db_status}'")
 
             except Exception as e:
-                print(f"⚠️ Post-upload validation failed for record_id={record_id}: {e}")
+                print(f"⚠️ Post-upload decision failed for record_id={record_id}: {e}")
                 logging.exception(
-                    f"⚠️ Post-upload validation failed for record_id={record_id}: {e}"
+                    f"⚠️ Post-upload decision failed for record_id={record_id}: {e}"
                 )
 
     # 4) Forward document attachments (if any) to internal CC email
@@ -853,16 +856,16 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
 
         # Enhance conversation text with attachment information so LLM can "see" attachments in the conversation
         classification_str = ""
-        if uploaded_count > 0 and uploaded_attachment_names:
-
-            # 1. Build classification summary from SmartImageClassifier results
+        if classification_results:
+            # 1. Build classification summary (uploaded / replaced, or why a photo was left alone)
             classification_summary_list = []
             for res in classification_results:
-                if res.get("should_upload"):
-                    fname = res['attachment'].get('filename', 'Unknown')
-                    lbl = res.get('label', 'Unclassified')
-                    classification_summary_list.append(f"'{fname}' -> {lbl}")
-
+                fname = res['attachment'].get('filename', 'Unknown')
+                lbl = res.get('label') or 'Unclassified'
+                if res.get("uploaded"):
+                    classification_summary_list.append(f"'{fname}' -> {lbl} (uploaded, replaced previous photo)")
+                else:
+                    classification_summary_list.append(f"'{fname}' -> {lbl} (not uploaded: {res.get('reason')})")
             classification_str = "; ".join(classification_summary_list)
 
         # 2. Format missing views string
@@ -874,8 +877,8 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
 
         # 3. Construct System Note
         attachment_info = (
-            f"\n\n[SYSTEM NOTE - ATTACHMENTS RECEIVED: This email included {uploaded_count} photo/attachment(s) "
-            f"that were successfully uploaded to our system.\n"
+            f"\n\n[SYSTEM NOTE - ATTACHMENTS RECEIVED: This email included {len(classification_results)} truck photo(s); "
+            f"{uploaded_count} were uploaded to our system (requested views: {requested_views}).\n"
             f"Classification Results: {classification_str}.\n"
             f"Remaining Missing Views: {missing_str}.\n"
             f"Use this information to inform the user about what was received and what (if anything) is still needed.]\n"
@@ -991,7 +994,7 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
         # If seller asked a question, generate a reply and send it
         outbound_reply = None
         print(f"🔍 Intent detected as '{intent}' - generating email reply")
-        if intent in ("question"):
+        if intent == "question":
             logging.info(f"🔍 Intent detected as '{intent}' - generating email reply")
             print("Conversation Text So far:\n\n" + conversation_text)
             conversation_template = user_config["templates"]["conversation"]
@@ -1056,7 +1059,7 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
             record_id=record_id,
             conversation_text=conversation_text,
             provider="openai",
-            truck_photos_count=uploaded_count,  # Count of truck photos uploaded to Quickbase
+            truck_photos_count=max(uploaded_count, classified_count),  # truck photos received in this email
             documents_count=len(document_attachments),  # Count of document attachments
             document_filenames=document_filenames,  # List of document filenames for LLM analysis
         )
@@ -1086,8 +1089,7 @@ async def handle_inbound_email_task(record_id, from_email, to_email, subject, te
             # Transition to Complete
             if suggested_status == "Complete" and current_status in ["Need Pics", "New Lead", "Manual Intervention"]:
                  print(f"LLM suggests 'Complete' status for record id {record_id}. Updating DB...")
-                 from app.communication.conversation_repository import update_lead_status_pg
-                 await update_lead_status_pg(int(record_id), "Complete")
+                 await update_lead_status_pg(int(record_id), "Complete")  # module-level import
                  
                  # Force confirmation flags to 1 as LLM is satisfied
                  update_pics_flag = Queries.UPDATE_RECORD.format(

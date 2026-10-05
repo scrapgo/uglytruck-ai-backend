@@ -322,6 +322,7 @@ Below are the helper functions and endpoints for sendgrid
 import base64
 import httpx
 import os
+import re
 
 QB_REALM = os.getenv("QB_REALM")
 QB_USER_TOKEN = os.getenv("QB_USER_TOKEN")
@@ -517,14 +518,35 @@ async def get_record_website_photo_urls_anywhere(record_id: int) -> list:
         return []
 
 
-async def get_record_photo_status(record_id: int) -> dict:
+def _extract_file_info(file_val):
     """
-    Fetch the current values of photo fields from Quickbase for a specific record.
-    Checks both website URL fields (163-169) and file attachment fields (38-40, 46-49).
-    Returns a dict mapping column names to their Quickbase status (URL, filename, or None).
+    (fileName, versionNumber) for a Quickbase file-attachment cell, or (None, None) when empty.
+    The records/query API returns {"url": ..., "versions": [{"fileName", "versionNumber", ...}]};
+    older code expected {"fileName": ...}. Both shapes are accepted.
     """
-    url = f"https://api.quickbase.com/v1/records/query"
-    
+    if not isinstance(file_val, dict):
+        return None, None
+    versions = [v for v in (file_val.get("versions") or []) if isinstance(v, dict)]
+    if versions:
+        latest = max(versions, key=lambda v: int(v.get("versionNumber") or 0))
+        return latest.get("fileName") or "attached", int(latest.get("versionNumber") or 1)
+    if file_val.get("fileName"):
+        return file_val["fileName"], int(file_val.get("versionNumber") or 1)
+    if file_val.get("url"):
+        m = re.search(r"/v(\d+)/?$", str(file_val["url"]))
+        return "attached", int(m.group(1)) if m else 1
+    return None, None
+
+
+def photo_file_url(record_id: int, field_id: int, version: int = 1, table_id: str = None) -> str:
+    """Relative Quickbase REST path of a file attachment; app/routers/models.py prefixes the API base URL."""
+    return f"files/{table_id or QB_TABLE_ID or 'br5nbqyfg'}/{record_id}/{field_id}/{version or 1}"
+
+
+async def _fetch_photo_record_data(record_id: int):
+    """Query the photo fields of one record. Returns (record_cells, table_id) or (None, None)."""
+    url = "https://api.quickbase.com/v1/records/query"
+
     select_ids = [QB_KEY_FIELD_ID]
     for m in QB_PHOTO_FIELD_MAP.values():
         select_ids.append(m["file_id"])
@@ -542,7 +564,6 @@ async def get_record_photo_status(record_id: int) -> dict:
         "Content-Type": "application/json",
     }
 
-    record_data = None
     async with httpx.AsyncClient(timeout=30) as client:
         for tbl in tables_to_try:
             payload = {
@@ -555,30 +576,48 @@ async def get_record_photo_status(record_id: int) -> dict:
                 if resp.status_code == 200:
                     records = resp.json().get("data", [])
                     if records:
-                        record_data = records[0]
-                        break
+                        return records[0], tbl
             except Exception as e:
                 logging.error(f"Failed to fetch photo status from Quickbase table {tbl}: {e}")
+    return None, None
 
+
+async def get_record_photo_values(record_id: int) -> dict:
+    """
+    Per view, BOTH the file attachment (fields 38-49) and the website URL (fields 163-169):
+        {col: {"file": fileName|None, "file_version": int|None, "file_url": "files/..."|None, "web": url|None}}
+    Returns {} when the record is not found.
+    """
+    record_data, tbl = await _fetch_photo_record_data(record_id)
     if not record_data:
         logging.warning(f"No photo data found in Quickbase for record_id={record_id}")
         return {}
 
     result = {}
     for col_name, mapping in QB_PHOTO_FIELD_MAP.items():
-        file_val = record_data.get(str(mapping["file_id"]), {}).get("value")
+        file_name, file_version = _extract_file_info(record_data.get(str(mapping["file_id"]), {}).get("value"))
         web_val = record_data.get(str(mapping["web_id"]), {}).get("value")
-        
-        # 1. Prefer website URL if present
-        if web_val and isinstance(web_val, str) and web_val.strip():
-            result[col_name] = web_val.strip()
-        # 2. Or file attachment if present
-        elif file_val and isinstance(file_val, dict) and file_val.get("fileName"):
-            result[col_name] = file_val.get("fileName")
-        else:
-            result[col_name] = None
-
+        web_val = web_val.strip() if isinstance(web_val, str) and web_val.strip() else None
+        result[col_name] = {
+            "file": file_name,
+            "file_version": file_version,
+            "file_url": photo_file_url(record_id, mapping["file_id"], file_version, tbl) if file_name else None,
+            "web": web_val,
+        }
     return result
+
+
+async def get_record_photo_status(record_id: int) -> dict:
+    """
+    One value per view, or None when the view has no photo.
+    A file uploaded to the record (a seller's emailed photo, or one Dale attached) wins over the
+    website URL: it is the newer, deliberately placed photo and replaces the website one.
+    """
+    values = await get_record_photo_values(record_id)
+    if not values:
+        return {}
+    return {col: (v["file_url"] or v["web"]) for col, v in values.items()}
+
 
 async def fetch_and_sync_record_photos(conn, record_id: int) -> dict:
     """

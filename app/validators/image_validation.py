@@ -87,6 +87,9 @@ async def validate_images(rec: dict, gpt_vision_url: str):
             val_str = str(val).strip()
             if val_str.startswith("http://") or val_str.startswith("https://"):
                 url = val_str
+            elif val_str.startswith("files/"):
+                # Already a Quickbase REST file path (written by the inbound email handler / photo sync)
+                url = val_str
             else:
                 url = f"files/{table_id}/{record_id}/{field_id}/1"
             image_urls.append(url)
@@ -109,6 +112,28 @@ async def validate_images(rec: dict, gpt_vision_url: str):
             )
         except Exception as e:
             logging.warning(f"[validate_images] ⚠️ Could not scan Quickbase for misplaced website photos (record_id={record_id}): {e}")
+
+    # 2c️⃣ A photo the seller emailed back is uploaded into the file field (38-49) and REPLACES the
+    # website photo for that view. For website leads, swap the website URL for the file so the
+    # replacement, not the old photo, is what gets validated.
+    if record_id and any(u.startswith("http") for u in image_urls):
+        try:
+            from app.quickbase.webhook_operations import get_record_photo_values
+            qb_values = await get_record_photo_values(int(record_id))
+            for key in PHOTO_FIELD_MAP:
+                file_url = (qb_values.get(key) or {}).get("file_url")
+                if not file_url:
+                    continue
+                label = PHOTO_VIEW_LABELS[key]
+                old_url = views_with_urls.get(label)
+                if old_url and old_url in image_urls and old_url != file_url:
+                    image_urls[image_urls.index(old_url)] = file_url
+                    logging.info(f"[validate_images] 🔁 record_id={record_id}: '{label}' uses uploaded file {file_url} instead of {old_url}")
+                elif file_url not in image_urls:
+                    image_urls.append(file_url)
+                views_with_urls[label] = file_url
+        except Exception as e:
+            logging.warning(f"[validate_images] ⚠️ Could not check Quickbase file attachments for record_id={record_id}: {e}")
 
     logging.info(f"[validate_images] 📸 Extracted {len(image_urls)} image URL(s) for record_id={record_id}: {image_urls}")
 

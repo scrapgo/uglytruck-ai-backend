@@ -51,7 +51,7 @@ app.include_router(llm_router, prefix="/llm", tags=["LLM"])
 app.include_router(webhooks_router, prefix="/webhooks", tags=["Webhooks"])
 
 # Bump on each deploy. `GET /health` returns it, so you can confirm which code the server runs.
-APP_VERSION = "2026-10-01.5-photo-scan"
+APP_VERSION = "2026-10-05.1-reply-photos-replace"
 STARTED_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 def _git_commit() -> str:
