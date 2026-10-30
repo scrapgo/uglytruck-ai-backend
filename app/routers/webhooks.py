@@ -126,7 +126,6 @@ async def webhook(request: Request):
         clean_values = preprocess_values(values)
 
         # Check if photos are missing from webhook payload; if so, fetch directly from Quickbase (including website photo URLs)
-        from app.validators.image_validation import PHOTO_FIELD_MAP
         has_any_photos = any(clean_values.get(k) for k in PHOTO_FIELD_MAP)
         qb_photos_filled = False
         if not has_any_photos:
