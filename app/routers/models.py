@@ -24,14 +24,16 @@ gpt_vision_classifier = GPTVisionTruckViewClassifier()
 UPLOAD_DIRECTORY = "app/database/uploaded_truck_images"
 os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
 
-# User-Agents tried, in order, when downloading images from external (non-Quickbase) URLs such as
-# the WordPress uploads on uglytruck.net. The site's firewall answers HTTP 403 to the Chrome/120
-# string that used to be hardcoded here, which made every website photo "missing". On a 403 we
-# retry with the next entry. An empty string means "send httpx's default User-Agent".
+# User-Agent strings tried, in order, for external (non-Quickbase) image URLs such as the WordPress
+# uploads on uglytruck.net. The site's firewall rejects some agents: it answered HTTP 403 to the
+# Chrome/120 string once hardcoded here (2026-09-30) and now drops the TCP connection without any
+# HTTP status for Chrome/120 and Chrome/128 (2026-11-03), while the plain httpx default and a Safari
+# UA are served normally. _fetch_image moves to the next entry on any failure (dropped connection or
+# non-200 reply), so the ones that work come first. An empty string means "send httpx's default UA".
 EXTERNAL_URL_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "",  # httpx default (python-httpx/x.y)
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
 ]
 
 
@@ -119,17 +121,30 @@ async def _fetch_image(
             else:
                 req_headers = download_headers
 
-            resp = await client.get(complete_url, headers=req_headers)
+            try:
+                resp = await client.get(complete_url, headers=req_headers)
+            except httpx.RequestError as e:
+                # Some hosts' firewalls drop the connection for certain User-Agent strings instead of
+                # answering 403 (uglytruck.net does this for Chrome UAs). Try the next one before giving up.
+                if is_external_url and ua_index < len(EXTERNAL_URL_USER_AGENTS) - 1:
+                    logging.warning(
+                        f"[fetch_image] {type(e).__name__} for {complete_url} with User-Agent "
+                        f"'{EXTERNAL_URL_USER_AGENTS[ua_index] or 'httpx default'}': {e}. Retrying with the next User-Agent."
+                    )
+                    ua_index += 1
+                    continue
+                raise
 
             if resp.status_code == 200:
                 if attempt > 1:
                     print(f"Successfully fetched image after {elapsed_time:.1f}s (attempt {attempt})")
                 break
 
-            # Some hosts' firewalls block specific User-Agent strings with 403. Try the next one first.
-            if resp.status_code == 403 and is_external_url and ua_index < len(EXTERNAL_URL_USER_AGENTS) - 1:
+            # Some hosts' firewalls block specific User-Agent strings (403 or another non-200 answer).
+            # Try the next one before treating the status as an error.
+            if is_external_url and ua_index < len(EXTERNAL_URL_USER_AGENTS) - 1:
                 logging.warning(
-                    f"[fetch_image] HTTP 403 for {complete_url} with User-Agent "
+                    f"[fetch_image] HTTP {resp.status_code} for {complete_url} with User-Agent "
                     f"'{EXTERNAL_URL_USER_AGENTS[ua_index] or 'httpx default'}'. Retrying with the next User-Agent."
                 )
                 ua_index += 1

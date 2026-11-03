@@ -150,6 +150,16 @@ async def validate_images(rec: dict, gpt_vision_url: str):
                 clip_data = clip_response.json()
                 missing_views = clip_data.get("missing", [])
                 logging.info(f"[validate_images] 🎯 GPT Vision returned missing_views={missing_views} for record_id={record_id}")
+                details = clip_data.get("detailed_results") or []
+                if details and all("predicted_label" not in d for d in details):
+                    # Not one photo could be downloaded (e.g. the website firewall dropped every request), so
+                    # nothing was classified. Telling the seller every view is missing would be wrong; treat it
+                    # like a vision outage and report only the views that have no photo at all.
+                    logging.error(
+                        f"[validate_images] ❌ record_id={record_id}: none of the {len(details)} photo(s) could be "
+                        f"downloaded, nothing was classified. Errors: {[d.get('error') for d in details]}"
+                    )
+                    missing_views = list(set(ALL_REQUIRED_VIEWS) - set(views_with_urls.keys()))
             else:
                 logging.error(f"[validate_images] ❌ GPT Vision call failed ({clip_response.status_code}): {clip_response.text}")
                 # Fallback: report only views that had no photo uploaded at all
