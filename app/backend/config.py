@@ -17,7 +17,7 @@ user_config = load_config()
 class Settings:
     # OpenAI Credentials
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")  # Default to mini for cost efficiency
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")  # photo view classifier; override with OPENAI_MODEL in .env
 
     # Sendgrid credentials
     SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")

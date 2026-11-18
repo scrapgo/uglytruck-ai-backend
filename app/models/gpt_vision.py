@@ -1,10 +1,17 @@
 import base64
 import json
+import os
 from io import BytesIO
 from PIL import Image
 from typing import Dict, Optional, Union
 from openai import AsyncOpenAI
 from app.backend.config import settings
+
+# The OpenCLIP left/right hint is trusted only at or above this confidence. Its scores are usually
+# tiny (0.001-0.013 on real listings, 2026-11-04), i.e. a coin flip, and a wrong hint turned a driver
+# side photo into a second passenger side one ("Exterior Driver Side missing"). Below it GPT decides
+# the side itself from which way the truck's front points.
+ORIENTATION_MIN_CONFIDENCE = float(os.getenv("ORIENTATION_MIN_CONFIDENCE", "0.05"))
 
 
 class TruckViewClassifier:
@@ -30,7 +37,22 @@ class TruckViewClassifier:
         image.save(buffered, format="JPEG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
+    @staticmethod
+    def _strong_hint(orientation_hint: Optional[Dict]) -> Optional[Dict]:
+        """The hint, only when it is clear enough to decide driver vs passenger side."""
+        if not orientation_hint:
+            return None
+        if orientation_hint.get("predicted_label") not in {"cab_on_left", "cab_on_right"}:
+            return None
+        try:
+            confidence = float(orientation_hint.get("confidence", 0))
+        except (TypeError, ValueError):
+            return None
+        return orientation_hint if confidence >= ORIENTATION_MIN_CONFIDENCE else None
+
     def _build_prompt(self, orientation_hint: Optional[Dict]) -> str:
+        if not orientation_hint:
+            return self._build_prompt_without_hint()
         orientation_text = json.dumps(orientation_hint or {}, indent=2)
         return f"""You are classifying a truck image into exactly one allowed label.
 
@@ -50,7 +72,29 @@ Reasoning rules:
 - If the image is an engine-side view, the side label must match the orientation hint:
     cab_on_left -> Passenger Side
     cab_on_right -> Driver Side
-- Respond with ONLY one exact label from the allowed labels.
+- If the image does not show a truck at all (a screenshot, document, person, or other object),
+  respond exactly: Not a truck photo
+- Otherwise respond with ONLY one exact label from the allowed labels.
+"""
+
+    def _build_prompt_without_hint(self) -> str:
+        return f"""You are classifying a truck image into exactly one allowed label.
+
+Allowed labels:
+{chr(10).join(f'- {label}' for label in self.labels)}
+
+Reasoning rules:
+- First inspect the image and determine whether it is front, rear, interior, exterior side, or engine side.
+- If the image is front, rear, or interior, choose the correct non-side label.
+- For an exterior side view or an engine-side view (hood open, seen from the side or a front corner),
+  decide the side yourself. These are US trucks: the driver sits on the truck's LEFT.
+  Find which way the FRONT of the truck (headlights, bumper, grille, front wheel) points in the photo:
+  front points to the LEFT of the photo -> Driver Side
+  front points to the RIGHT of the photo -> Passenger Side
+  A steering wheel seen through the nearest door window also means Driver Side.
+- If the image does not show a truck at all (a screenshot, document, person, or other object),
+  respond exactly: Not a truck photo
+- Otherwise respond with ONLY one exact label from the allowed labels.
 """
 
     def _apply_orientation_hint(self, predicted_label: str, orientation_hint: Optional[Dict]) -> tuple[str, bool]:
@@ -91,7 +135,8 @@ Reasoning rules:
             image = Image.open(image_input).convert("RGB")
 
         base64_image = self._encode_image(image)
-        prompt = self._build_prompt(orientation_hint)
+        used_hint = self._strong_hint(orientation_hint)
+        prompt = self._build_prompt(used_hint)
 
         try:
             response = await self.client.chat.completions.create(
@@ -120,9 +165,23 @@ Reasoning rules:
             if gpt_predicted_label not in self.labels:
                 gpt_predicted_label = self._find_closest_label(raw_response)
 
+            if gpt_predicted_label is None:
+                # Not a truck view (screenshot, document, random photo): it counts for no view.
+                return {
+                    "predicted_label": None,
+                    "gpt_predicted_label": None,
+                    "unrelated": True,
+                    "orientation_override_applied": False,
+                    "orientation_hint_used": False,
+                    "probabilities": {label: 0.0 for label in self.labels},
+                    "orientation_hint": orientation_hint,
+                    "model": self.model,
+                    "raw_response": raw_response,
+                }
+
             predicted_label, orientation_override_applied = self._apply_orientation_hint(
                 gpt_predicted_label,
-                orientation_hint,
+                used_hint,
             )
 
             probabilities = {label: 0.01 for label in self.labels}
@@ -132,6 +191,7 @@ Reasoning rules:
                 "predicted_label": predicted_label,
                 "gpt_predicted_label": gpt_predicted_label,
                 "orientation_override_applied": orientation_override_applied,
+                "orientation_hint_used": used_hint is not None,
                 "probabilities": probabilities,
                 "orientation_hint": orientation_hint,
                 "model": self.model,
@@ -149,7 +209,8 @@ Reasoning rules:
                 "error": str(e),
             }
 
-    def _find_closest_label(self, response: str) -> str:
+    def _find_closest_label(self, response: str) -> Optional[str]:
+        """Map a free-text GPT answer to a label, or None when it is not a truck view at all."""
         response_lower = response.lower()
         for label in self.labels:
             if label.lower() in response_lower:
@@ -170,5 +231,7 @@ Reasoning rules:
         if "interior" in response_lower or "cab" in response_lower:
             return "Interior View of the truck"
 
-        print(f"Warning: Could not match GPT response '{response}' to any label. Using first label.")
-        return self.labels[0]
+        # 2026-11-05: answers like "this image does not depict a truck" used to fall back to the first
+        # label (Exterior Front), so an unrelated upload could pass as the front photo. No label now.
+        print(f"Warning: GPT response '{response}' is not a truck view. Leaving this photo unlabelled.")
+        return None

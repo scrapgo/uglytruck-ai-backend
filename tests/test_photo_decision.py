@@ -172,5 +172,62 @@ class QuickbasePhotoValues(unittest.TestCase):
             self.assertEqual(asyncio.run(wo.get_record_photo_status(1)), {})
 
 
+# --- 2026-11-04: missing-view check, side pairs ------------------------------------------------
+from PIL import Image, ImageDraw  # noqa: E402
+
+from app.utils.photo_decision import fill_side_pairs, image_hash  # noqa: E402
+
+
+def _picture(seed):
+    img = Image.new("RGB", (120, 90), "white")
+    draw = ImageDraw.Draw(img)
+    for i in range(6):
+        x = (seed * 37 + i * 23) % 100
+        draw.rectangle((x, i * 14, x + 15, i * 14 + 10), fill="black")
+    return img
+
+
+class SidePairTests(unittest.TestCase):
+    def test_two_different_photos_on_one_side_count_as_both_sides(self):
+        results = [
+            {"predicted_label": "Exterior Passenger Side", "image_hash": image_hash(_picture(1))},
+            {"predicted_label": "Exterior Passenger Side", "image_hash": image_hash(_picture(2))},
+        ]
+        found = {"Exterior Passenger Side"}
+        assert fill_side_pairs(results, found) == ["Exterior Driver Side"]
+        assert found == {"Exterior Passenger Side", "Exterior Driver Side"}
+
+    def test_the_same_photo_twice_is_not_the_other_side(self):
+        same = _picture(3)
+        results = [
+            {"predicted_label": "Engine Passenger Side", "image_hash": image_hash(same)},
+            {"predicted_label": "Engine Passenger Side", "image_hash": image_hash(same.resize((300, 225)))},
+        ]
+        found = {"Engine Passenger Side"}
+        self.assertEqual(fill_side_pairs(results, found), [])
+        self.assertNotIn("Engine Driver Side", found)
+
+    def test_one_photo_or_both_sides_already_found_changes_nothing(self):
+        one = [{"predicted_label": "Exterior Driver Side", "image_hash": image_hash(_picture(4))}]
+        found = {"Exterior Driver Side"}
+        assert fill_side_pairs(one, found) == [] and found == {"Exterior Driver Side"}
+        both = one + [{"predicted_label": "Exterior Passenger Side", "image_hash": image_hash(_picture(5))}]
+        found = {"Exterior Driver Side", "Exterior Passenger Side"}
+        assert fill_side_pairs(both, found) == []
+
+    def test_unrelated_views_are_never_filled_in(self):
+        results = [
+            {"predicted_label": "Exterior Front", "image_hash": image_hash(_picture(6))},
+            {"predicted_label": "Exterior Front", "image_hash": image_hash(_picture(7))},
+        ]
+        found = {"Exterior Front"}
+        assert fill_side_pairs(results, found) == [] and found == {"Exterior Front"}
+
+    def test_photos_without_a_hash_are_treated_as_the_same(self):
+        results = [{"predicted_label": "Exterior Passenger Side"}, {"predicted_label": "Exterior Passenger Side"}]
+        found = {"Exterior Passenger Side"}
+        assert fill_side_pairs(results, found) == []
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ from app.backend.config import settings
 from app.models.gpt_vision import TruckViewClassifier as GPTVisionTruckViewClassifier
 from app.models.open_clip import TruckViewClassifier as OpenClipTruckOrientationClassifier
 from app.utils.folder_utils import clean_folder
+from app.utils.photo_decision import fill_side_pairs, found_views, image_hash
 router = APIRouter()
 
 
@@ -271,18 +272,20 @@ async def fetch_and_classify_image(
         orientation_hint=orientation,
     )
     predicted_label = result["predicted_label"]
-    print(f"Truck View Image Label: {predicted_label}")
+    print(f"Truck View Image Label: {predicted_label or 'not a truck view'}")
 
     return {
         "image_index": fetched["image_index"],
         "image_url": fetched["image_url"],
         "predicted_label": predicted_label,
+        "image_hash": image_hash(fetched["image"]),
         "probabilities": result["probabilities"],
         "cab_orientation": orientation,
         "model": result.get("model"),
         "raw_response": result.get("raw_response"),
         "gpt_predicted_label": result.get("gpt_predicted_label"),
         "orientation_override_applied": result.get("orientation_override_applied", False),
+        "unrelated": result.get("unrelated", False),
         **({"error": result["error"]} if "error" in result else {}),
     }
 
@@ -330,7 +333,10 @@ async def image_quality_analyzer(image_urls: Union[List[str], List[Dict]]):
         ]
         view_results = await asyncio.gather(*tasks)
 
-    found_labels = {r["predicted_label"] for r in view_results if "predicted_label" in r}
+    found_labels = found_views(view_results)
+    paired = fill_side_pairs(view_results, found_labels)
+    if paired:
+        logging.info(f"[gpt-vision] two different photos on one side, so counting the other side too: {paired}")
     all_labels = set(gpt_vision_classifier.labels)
     missing_labels = list(all_labels - found_labels)
 

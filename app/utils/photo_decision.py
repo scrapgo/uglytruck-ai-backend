@@ -148,3 +148,57 @@ def remaining_requested_views(requested_views: List[str], uploaded_views: List[s
     """Views the reminder asked for that this reply did not cover."""
     uploaded = set(uploaded_views)
     return [v for v in requested_views if v not in uploaded]
+
+
+# --- Missing-view check: a side pair labelled the same side twice ------------------------------
+# 2026-11-04: the classifier can put both photos of a pair on one side (driver and passenger side
+# photos both called "Exterior Passenger Side"), and the seller was told the driver side was
+# missing. Two DIFFERENT photos on one side, with the other side empty, mean both sides were sent.
+# The same photo uploaded twice (near-identical image hash) never counts as the second side.
+SIDE_PAIRS = (
+    ("Exterior Driver Side", "Exterior Passenger Side"),
+    ("Engine Driver Side", "Engine Passenger Side"),
+)
+DUPLICATE_MAX_DISTANCE = 10  # of 64 bits: closer than this is the same photo
+
+
+def image_hash(image) -> int:
+    """64-bit difference hash of a PIL image: survives resizing and recompression."""
+    small = image.convert("L").resize((9, 8))
+    px = list(small.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (px[row * 9 + col] > px[row * 9 + col + 1])
+    return bits
+
+
+def _distinct(hashes: List[Optional[int]]) -> bool:
+    """True when at least two of these photos are different pictures."""
+    known = [h for h in hashes if h is not None]
+    if len(hashes) >= 2 and len(known) < 2:
+        return False  # can't tell: assume the same photo
+    return any(bin(a ^ b).count("1") > DUPLICATE_MAX_DISTANCE for i, a in enumerate(known) for b in known[i + 1:])
+
+
+def found_views(view_results: List[Dict]) -> set:
+    """Labels of the photos classified as a truck view. Unlabelled (not a truck) and failed photos are skipped."""
+    return {r["predicted_label"] for r in view_results if r.get("predicted_label")}
+
+
+def fill_side_pairs(view_results: List[Dict], found_labels: set) -> List[str]:
+    """
+    Add the empty side of a pair to found_labels when two different photos were both put on the
+    other side. view_results: per-photo dicts with 'predicted_label' and optional 'image_hash'.
+    Returns the labels added (for logging).
+    """
+    added = []
+    for a, b in SIDE_PAIRS:
+        for have, empty in ((a, b), (b, a)):
+            if empty in found_labels or have not in found_labels:
+                continue
+            hashes = [r.get("image_hash") for r in view_results if r.get("predicted_label") == have and "error" not in r]
+            if _distinct(hashes):
+                found_labels.add(empty)
+                added.append(empty)
+    return added
